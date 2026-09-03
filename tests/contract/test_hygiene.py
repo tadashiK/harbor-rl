@@ -37,7 +37,7 @@ _IDENTITY_RE = re.compile(
 # expected. Stripped before the identity scan so any OTHER use of the handle (home
 # paths, W&B entities) still fails.
 _PUBLISHER_URL_RE = re.compile(
-    r"(?:github\.com/)?supersglzc/harbor(?:-dev)?(?:\.git)?"
+    r"(?:github\.com/)?supersglzc/harbor(?:-rl)?(?:\.git)?"
     r"|supersglzc\.github\.io"
 )
 

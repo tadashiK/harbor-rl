@@ -1,0 +1,326 @@
+# Task history — `{{TASK_ID}}`
+
+Rendered by `task-generator` at entry, **before** any authoring, so every section already has
+its slot. Each section is filled in twice: **Analysis** when Phase A authors it, **Validations**
+when Phase B smokes it.
+
+Format rules — `scripts/task-generator/check_task_history.py` enforces them before the agent
+returns:
+
+- Every numbered term's answer goes on the line(s) **below** its label, replacing `_pending_`.
+- `_pending_` anywhere in the finished file is a defect. `_none_` is a valid answer, and an
+  explicit claim that there was nothing — use it where the scaffold already offers it.
+- A §1..§5 section not in `sections` has both its subsections replaced with
+  `_not requested_`. The **S6** block is not a numbered section and is always filled.
+- Every check row's verdict is diffed against the smoke's own `<smoke>.verdict.json`. Write
+  what the smoke reported.
+
+| Field | Value |
+|---|---|
+| task_id | `{{TASK_ID}}` |
+| slug | `{{SLUG}}` |
+| mode | {{MODE}} |
+| sections requested | {{SECTIONS}} |
+| design base | {{DESIGN_BASE}} |
+| started_at | {{STARTED_AT}} |
+| finished_at | _pending_ |
+| status | _pending_ |
+
+## Adaptation delta
+
+<!-- Filled in Phase 0, per knowledge/references/adapt-first.md. -->
+
+1. **Base**
+   <!-- The task-library spec being adapted, or "pure creation mode" when the search found
+        nothing usable. -->
+   _pending_
+
+2. **Kept as-is**
+   _pending_
+
+3. **Changed, and why**
+   _pending_
+
+---
+
+## §1 — Registration + scene
+
+### Analysis
+
+<!-- Terms: s1-scene.md § Analysis terms. -->
+
+1. **Task interpretation**
+   _pending_
+
+2. **Desired robot behavior**
+   _pending_
+
+3. **Potential failures**
+   _pending_
+
+4. **Decisions resolved**
+   _pending_
+
+5. **Delta vs the base**
+   _pending_
+
+6. **Files written / edited**
+   _pending_
+
+7. **User Q&A**
+   _none_
+
+### Validations
+
+| Check | Verdict | Evidence |
+|---|---|---|
+| C1 registration + build | | |
+| C2 action space | | |
+| C3 observation space | | |
+| C4 max episode length | | |
+| C5 timing (dt · decimation · step_dt) | | |
+| C6 collision geometry | | |
+| C7 articulation limits | | |
+| C8 collision provenance | | |
+
+| Smoke | Attempts | Verdict | Evidence |
+|---|---|---|---|
+| S1 | | | |
+
+**Collision review** — every collider accepted into `COLLISION_REVIEWED` instead of re-cooked,
+with the reason it does not matter for this task (no rows is the normal case):
+
+| Prim path | Solidity | Approximation | Why accepted |
+|---|---|---|---|
+
+**Articulation exclusions** — everything in `ARTICULATION_EXCLUDE` beyond the action-driven
+robot, and why C7 does not need to test it:
+
+| Asset / joint | Why excluded |
+|---|---|
+
+**Collision decomposition** — one row per mesh asset: the CoACD hull count, and for anything in
+`PRIMITIVE_ASSETS` the reason an analytic collider is right instead:
+
+| Asset | Source mesh | Hulls (budget 32) | or: why primitive |
+|---|---|---|---|
+
+---
+
+## §2 — Action terms
+
+### Analysis
+
+<!-- Terms: s2-actions.md § Analysis terms. -->
+
+1. **Does the desired behavior require EE orientation?**
+   _pending_
+
+2. **Decisions resolved**
+   _pending_
+
+3. **Delta vs the base**
+   _pending_
+
+4. **Files written / edited**
+   _pending_
+
+5. **User Q&A**
+   _none_
+
+### Validations
+
+| Smoke | Attempts | Verdict | Evidence |
+|---|---|---|---|
+| S2 | | | |
+| S2.5 (actuator tracking) | | | |
+
+**S2.5 parameter tuning** — every actuator parameter changed to make it pass (no rows if it
+passed first try):
+
+| Parameter | From | To | Residual after |
+|---|---|---|---|
+
+---
+
+## §3 — Reset / events
+
+### Analysis
+
+<!-- Terms: s3-reset.md § Analysis terms. -->
+
+1. **Reset layout — feasibility**
+   _pending_
+
+2. **Decisions resolved**
+   _pending_
+
+3. **Delta vs the base**
+   _pending_
+
+4. **Files written / edited**
+   _pending_
+
+5. **User Q&A**
+   _none_
+
+### Validations
+
+| Check | Verdict | Evidence |
+|---|---|---|
+| C1 injected values | | |
+| C2 buffers populated | | |
+| C3 robot configuration | | |
+| C4 layout settles | | |
+| C5 repeatable | | |
+| V1 frames captured | | |
+| V2 frames are not blank | | |
+
+| Smoke | Attempts | Verdict | Evidence |
+|---|---|---|---|
+| S3 (numeric) | | | |
+| S3-visual (rendered resets) | | | |
+
+**Visual judgement** — what the reset frames actually showed. Record observations, not "looks
+correct":
+
+| Question | What the frames show |
+|---|---|
+| Every object reachable from the start pose? | |
+| Oriented so stage one needs no regrasp? | |
+| Path clear of the obstacles §1 named? | |
+| Anything intersecting or floating? | |
+| Already solved at t=0? | |
+
+---
+
+## §4 — Goal + termination
+
+### Analysis
+
+<!-- Terms: s4-termination.md § Analysis terms. -->
+
+1. **Subgoal decomposition**
+   _pending_
+
+2. **Final goal + success criterion**
+   _pending_
+
+3. **Which subgoals are implemented, and why the rest are not**
+   _pending_
+
+4. **Terminations**
+   _pending_
+
+5. **Decisions resolved**
+   _pending_
+
+6. **Delta vs the base**
+   _pending_
+
+7. **Files written / edited**
+   _pending_
+
+8. **User Q&A**
+   _none_
+
+### Validations
+
+| Check | Verdict | Evidence |
+|---|---|---|
+| G1 goal representation | | |
+
+**Keyframes** — what each `V<i>` frame actually showed. One row per predicate. Record
+observations, not "looks right":
+
+| Predicate | Keyframe | Is this the state the subgoal describes, or one that merely satisfies the arithmetic? |
+|---|---|---|
+
+| Smoke | Attempts | Verdict | Evidence |
+|---|---|---|---|
+| S4 | | | |
+
+---
+
+## §5 — Observation
+
+### Analysis
+
+<!-- Terms: s5-observation.md § Analysis terms. -->
+
+1. **Observability**
+   _pending_
+
+2. **Frame**
+   _pending_
+
+3. **Decisions resolved**
+   _pending_
+
+4. **Delta vs the base**
+   _pending_
+
+5. **Files written / edited**
+   _pending_
+
+6. **User Q&A**
+   _none_
+
+### Validations
+
+| Smoke | Attempts | Verdict | Evidence |
+|---|---|---|---|
+| S5 | | | |
+
+---
+
+## S6 — Render + visual check (whole-task gate, not a numbered section)
+
+### Analysis
+
+<!-- Terms: s6-render.md § Analysis terms. -->
+
+1. **What the rollout should show**
+   _pending_
+
+2. **Camera**
+   _pending_
+
+3. **User Q&A**
+   _none_
+
+### Validations
+
+| Smoke | Attempts | Verdict | Evidence |
+|---|---|---|---|
+| S6 (render) | | | |
+| S6 (visual check) | | | |
+
+---
+
+## Doc patches
+
+<!-- Every surgical edit to task-implementation.md, one row each. No rows is the normal case. -->
+
+| File | What was wrong | Patch |
+|---|---|---|
+
+## Final verdict
+
+| Section | Smokes | Verdict |
+|---|---|---|
+| §1 | | |
+| §2 | | |
+| §3 | | |
+| §4 | | |
+| §5 | | |
+| §6 | | |
+
+1. **Files written**
+   _pending_
+
+2. **Doc patches applied**
+   _pending_
+
+3. **Status**
+   _pending_

@@ -1,0 +1,16 @@
+
+
+class TanhDeterministicActor(nn.Module):
+    """TD3 actor — deterministic, tanh-bounded. Optional in-network RMS."""
+    action_dim: int
+    hidden_dims: Sequence[int] = (256, 256)
+    activation: str = "relu"
+    use_obs_rms: bool = False
+
+    @nn.compact
+    def __call__(self, x):
+        if self.use_obs_rms:
+            x = RunningMeanStd()(x)
+        x = MLP(self.hidden_dims, self.action_dim, self.activation,
+                output_init_scale=0.01)(x)
+        return jnp.tanh(x)

@@ -1,0 +1,222 @@
+"""
+{{PROJECT_NAME}} — env factory for custom_torch train/eval/render.
+
+Branches at runtime on cfg.gpu_sim:
+  - True  → benchmark-native GPU-batched factory (IsaacGym / IsaacLab / ManiSkill).
+            User fills in the factory call once; the placeholder raises a clear
+            NotImplementedError until then.
+  - False → gymnasium.vector.AsyncVectorEnv (or SyncVectorEnv) with a numpy↔torch
+            wrapper so downstream algorithm code sees torch tensors on `cfg.device`.
+
+Exposes:
+    create_env(cfg)         — vec/parallel env for train + eval
+    create_render_env(cfg)  — single env for render.py (1 env, render_mode='rgb_array')
+"""
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+import numpy as np
+import torch
+
+REPO     = Path(__file__).resolve().parents[4]   # actual repo root
+HARBOR = Path(__file__).resolve().parents[3]   # <repo>/harbor
+sys.path.insert(0, str(HARBOR))
+sys.path.insert(0, str(REPO))
+
+
+# -----------------------------------------------------------------------------
+# Per-benchmark single-env factory — auto-detects scripts/_<family>_env.py
+# -----------------------------------------------------------------------------
+def _make_single_env(task_id: str, render_mode=None, seed: int = 0):
+    import gymnasium as gym
+    env = None
+    scripts_dir = REPO / "scripts"
+    if scripts_dir.is_dir():
+        for helper in scripts_dir.glob("_*_env.py"):
+            # _isaaclab_env.py (reward-add-log Path B helper) is NOT a Path-A
+            # family factory — it needs Kit booted and is consumed on the
+            # gpu_sim branch. Importing it here (pre-boot) dies on pxr.
+            if helper.name == "_isaaclab_env.py":
+                continue
+            # Some benchmarks (e.g. dm_control) check a mounted source dir into
+            # the repo root that shadows the installed wheel. The helper module
+            # is responsible for normalizing cwd, but we ALSO drop the repo root
+            # from sys.path here so `from <pkg> import ...` inside the helper
+            # finds the wheel, not the mount.
+            _saved_path = list(sys.path)
+            sys.path[:] = [p for p in sys.path if Path(p).resolve() != REPO]
+            sys.path.insert(0, str(scripts_dir))
+            try:
+                module = __import__(helper.stem)
+            except Exception:
+                sys.path[:] = _saved_path
+                continue
+            for name in dir(module):
+                if name.startswith("make_") and name.endswith("_env"):
+                    fn = getattr(module, name)
+                    try:
+                        env = fn(task_id, render_mode=render_mode)
+                    except TypeError:
+                        env = fn(task_id)
+                    break
+            sys.path[:] = _saved_path
+            break
+    if env is None:
+        env = gym.make(task_id, render_mode=render_mode)
+    # The custom_torch algorithms (PPO/SAC/TD3 with MLP policies) require a
+    # Box observation space. Wrap Dict / Tuple observations with FlattenObservation.
+    if isinstance(env.observation_space, (gym.spaces.Dict, gym.spaces.Tuple)):
+        env = gym.wrappers.FlattenObservation(env)
+    return env
+
+
+# -----------------------------------------------------------------------------
+# CPU vec-env wrapper: numpy ↔ torch bridge over gymnasium.vector
+# -----------------------------------------------------------------------------
+class GymVecEnvWrapper:
+    """Wraps a gymnasium.vector.VectorEnv so step/reset return torch tensors on `device`.
+
+    Algorithm code (algo/sac.py etc.) assumes:
+      env.step(action_torch)              -> (obs_torch, reward_torch, done_torch, info)
+      env.reset()                         -> (obs_torch, extras) OR obs_torch
+      env.observation_space.shape         -> shape of single env's obs (NOT including num_envs)
+      env.action_space.shape[-1]          -> action dim
+    """
+    def __init__(self, vec_env, device: str | torch.device, episode_len: int | None = None):
+        self.env = vec_env
+        self.device = torch.device(device)
+        self.num_envs = vec_env.num_envs
+        # Expose single-env shapes (the algo code expects shape[0] == obs_dim, not num_envs).
+        single_obs = vec_env.single_observation_space
+        single_act = vec_env.single_action_space
+        self._obs_shape = tuple(single_obs.shape)
+        self._act_shape = tuple(single_act.shape)
+        self.observation_space = type("_Spc", (), {"shape": self._obs_shape})()
+        self.action_space = type("_Spc", (), {"shape": self._act_shape})()
+        self.max_episode_length = episode_len
+
+    def _to_torch(self, x):
+        if isinstance(x, np.ndarray):
+            return torch.from_numpy(np.asarray(x)).float().to(self.device)
+        if isinstance(x, (list, tuple)):
+            return torch.as_tensor(np.asarray(x), dtype=torch.float32, device=self.device)
+        if isinstance(x, torch.Tensor):
+            return x.to(self.device)
+        return torch.as_tensor(x, dtype=torch.float32, device=self.device)
+
+    def reset(self, **kwargs):
+        out = self.env.reset(**kwargs)
+        if isinstance(out, tuple):
+            obs, info = out[0], out[1]
+        else:
+            obs, info = out, {}
+        return self._to_torch(obs), info
+
+    def step(self, action):
+        if isinstance(action, torch.Tensor):
+            action_np = action.detach().cpu().numpy()
+        else:
+            action_np = np.asarray(action)
+        # Clip to bounds for envs with bounded action_space (most continuous envs).
+        try:
+            low = self.env.single_action_space.low
+            high = self.env.single_action_space.high
+            action_np = np.clip(action_np, low, high)
+        except Exception:
+            pass
+        step_out = self.env.step(action_np)
+        if len(step_out) == 5:
+            obs, reward, term, trunc, info = step_out
+            done = np.logical_or(term, trunc)
+            if isinstance(info, dict):
+                info = {**info, "TimeLimit.truncated": self._to_torch(trunc).bool()}
+        else:
+            obs, reward, done, info = step_out
+        return (self._to_torch(obs),
+                self._to_torch(reward),
+                self._to_torch(done).long(),
+                info if isinstance(info, dict) else {})
+
+
+def _make_cpu_vec_env(task_id: str, num_envs: int, seed: int):
+    import gymnasium as gym
+    factories = []
+    for i in range(num_envs):
+        s = seed + i
+        def _f(task_id=task_id, s=s):
+            env = _make_single_env(task_id, render_mode=None, seed=s)
+            return env
+        factories.append(_f)
+    if num_envs == 1:
+        return gym.vector.SyncVectorEnv(factories)
+    return gym.vector.AsyncVectorEnv(factories)
+
+
+# -----------------------------------------------------------------------------
+# Public factories
+# -----------------------------------------------------------------------------
+def create_env(cfg):
+    task = str(cfg.get("task"))
+    n = int(cfg.get("num_envs", cfg.get("n_envs", 1)))
+    seed = int(cfg.get("seed") or 0)
+    device = str(cfg.get("device", "cuda" if torch.cuda.is_available() else "cpu"))
+    gpu_sim = bool(cfg.get("gpu_sim", False))
+
+    if gpu_sim:
+        # >>> EDIT THIS BLOCK for your GPU-batched simulator. Examples:
+        #   IsaacGymEnvs:
+        #       from isaacgymenvs import make as ig_make
+        #       return ig_make(seed=seed, task=task, num_envs=n, sim_device=device,
+        #                      rl_device=device, graphics_device_id=0, headless=True)
+        #   IsaacLab:
+        #       import gymnasium as gym
+        #       return gym.make(task, num_envs=n, headless=True)
+        #   ManiSkill 3 (state mode, GPU-batched):
+        #       import gymnasium as gym, mani_skill.envs  # noqa: F401
+        #       return gym.make(task, num_envs=n, obs_mode='state',
+        #                       sim_backend='gpu', render_mode=None)
+        raise NotImplementedError(
+            f"gpu_sim=True for task '{task}' — wire up the benchmark-native batched factory "
+            "in harbor/scripts/rl/custom_torch/env_wrapper.py:create_env()."
+        )
+    vec = _make_cpu_vec_env(task, n, seed)
+    return GymVecEnvWrapper(vec, device=device)
+
+
+def create_render_env(cfg):
+    """Single env (n=1) with rendering enabled — used by render.py."""
+    task = str(cfg.get("task"))
+    seed = int(cfg.get("seed") or 0)
+    device = str(cfg.get("device", "cuda" if torch.cuda.is_available() else "cpu"))
+    env = _make_single_env(task, render_mode="rgb_array", seed=seed)
+    # Wrap in a 1-env vector so the agent code path stays uniform.
+    import gymnasium as gym
+
+    class _SingleVec:
+        num_envs = 1
+        single_observation_space = env.observation_space
+        single_action_space = env.action_space
+
+        def reset(self, **kw):
+            o = env.reset(**kw)
+            obs = o[0] if isinstance(o, tuple) else o
+            return np.expand_dims(np.asarray(obs), 0), (o[1] if isinstance(o, tuple) else {})
+
+        def step(self, action_np):
+            a = action_np[0] if action_np.ndim > 1 else action_np
+            out = env.step(a)
+            if len(out) == 5:
+                obs, r, term, trunc, info = out
+                return (np.expand_dims(obs, 0), np.array([r]),
+                        np.array([term]), np.array([trunc]), info)
+            obs, r, done, info = out
+            return np.expand_dims(obs, 0), np.array([r]), np.array([done]), info
+
+        def render(self):
+            return env.render()
+
+    wrapped = GymVecEnvWrapper(_SingleVec(), device=device)
+    wrapped._raw_env = env  # render.py uses this for frame extraction
+    return wrapped

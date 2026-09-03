@@ -1,0 +1,12 @@
+        })
+    cfg.num_envs = int(cfg.get("n_envs", cfg.get("num_envs", 1)))
+    cfg.gpu_sim = True
+    # Force RAW reward at eval: NormalizeVecReward replaces env.step's reward
+    # with reward/sqrt(var); during training that scaling is consistent across
+    # iters but during eval the wrapper starts with fresh stats and would
+    # divide by an arbitrarily-small std as it warms up — the eval mean_return
+    # would be incomparable across runs and meaningless. Always disable here.
+    cfg.normalize_env = False
+
+    task = cfg.get("task")
+    ckpt_path = cfg.get("checkpoint")

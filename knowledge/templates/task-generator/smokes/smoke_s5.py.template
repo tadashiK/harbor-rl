@@ -1,0 +1,61 @@
+"""S5 smoke — observation shape, term order, and at least one term value match the §5 design.
+
+The agent fills:
+
+  TASK_ID              — gym task id
+  EXPECTED_TERMS_PY    — Python literal: list of (name, shape) tuples for the policy group,
+                              in the exact slice order the obs is concatenated
+                              e.g. [("joint_pos_rel", (9,)), ("joint_vel_rel", (9,)), ...]
+  VALUE_CHECK_BLOCK    — Python lines that compute an expected value for ONE term from
+                              raw scene state and assert it matches the obs slice
+                              (e.g. joint_pos_rel == joint_pos - default_joint_pos)
+"""
+import argparse
+import sys
+
+# Kit's shutdown can kill the process before stdout flushes, losing the
+# `S<N> OK:` verdict line that IS this smoke's pass criterion.
+sys.stdout.reconfigure(line_buffering=True)
+from _verdict import Verdict   # noqa: E402  — sibling module, rendered alongside
+V = Verdict("S5")
+import torch
+from isaaclab.app import AppLauncher
+
+parser = argparse.ArgumentParser()
+AppLauncher.add_app_launcher_args(parser)
+args = parser.parse_args([])
+args.headless = True
+args.enable_cameras = False
+sim_app = AppLauncher(args).app
+
+import gymnasium as gym  # noqa: E402
+import isaaclab_tasks    # noqa: F401, E402
+from isaaclab_tasks.utils import parse_env_cfg  # noqa: E402
+
+TASK_ID = "{{TASK_ID}}"
+cfg = parse_env_cfg(TASK_ID, device="cuda:0", num_envs={{NUM_ENVS}}, use_fabric=True)
+env = gym.make(TASK_ID, cfg=cfg)
+unw = env.unwrapped
+obs, _ = env.reset(seed=0)
+
+# Print the term order + shapes for the log
+group_terms = dict(unw.observation_manager.active_terms)
+group_dims  = unw.observation_manager.group_obs_term_dim
+print("observation order (group → term: shape):")
+for group, terms in group_terms.items():
+    for name, dim in zip(terms, group_dims[group]):
+        print(f"  {group}.{name}: {tuple(dim)}")
+
+# Assert policy-group order + shapes match the §5 design
+EXPECTED_TERMS = {{EXPECTED_TERMS_PY}}
+actual = [(name, tuple(dim)) for name, dim in zip(group_terms["policy"], group_dims["policy"])]
+assert actual == EXPECTED_TERMS, (
+    f"obs term order/shape mismatch:\n  actual={actual}\n  expected={EXPECTED_TERMS}"
+)
+
+# Value check (at least one term)
+{{VALUE_CHECK_BLOCK}}
+
+V.done(f"{len(EXPECTED_TERMS)} terms, order + shapes match, value check verified")
+env.close()
+sim_app.close()

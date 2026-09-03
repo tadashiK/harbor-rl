@@ -1,0 +1,84 @@
+"""Verdict recorder shared by every §1–§6 smoke. Rendered to `<task_dir>/smokes/_verdict.py`.
+
+A smoke's result reaches `task-history.md` by way of the agent that just ran it — which is
+exactly the wrong party to trust with the transcription. The agent whose third attempt at S4
+finally errored is the one most inclined to write "pass (after fix)" into a table nobody diffs
+against the log.
+
+So the smoke records its own result, as a side effect of running, to
+`<smoke_file>.verdict.json`. `check_task_history.py` then diffs what the history CLAIMS against
+what the smoke REPORTED, and the transcription stops being load-bearing.
+
+Written **eagerly** — on construction, on every `check()`, and again at `done()` — because Kit's
+shutdown can kill the process before `atexit` handlers ever run. A file still reading
+`"status": "running"` means the smoke died mid-flight, which is itself the honest answer.
+
+No substitutions.
+
+Usage:
+
+    from _verdict import Verdict
+    V = Verdict("S4")                 # smoke id, as it appears in task-history.md
+
+    V.check("C1", "goal sampled", ok, detail)   # enumerated checks, one line each
+    ...
+    V.done("goal sampled deterministically; termination fires when forced")
+
+`done()` prints the `S<N> OK: ...` pass line and exits non-zero if any check failed. A bare
+`assert` that fires anywhere in the smoke is captured by the excepthook and recorded as a
+failure — smokes do not have to be rewritten into checks to participate.
+"""
+import json
+import sys
+import traceback
+from pathlib import Path
+
+
+class Verdict:
+    def __init__(self, smoke_id):
+        self.smoke_id = smoke_id
+        self.path = Path(sys.argv[0]).resolve().with_suffix(".verdict.json")
+        self.checks = {}
+        self.status = "running"
+        self.error = None
+        sys.excepthook = self._on_exception
+        self._flush()
+
+    def check(self, cid, title, ok, detail):
+        """Record + print one enumerated check. Never raises — the rest still run."""
+        ok = bool(ok)
+        print(f"[{cid}] {'PASS' if ok else 'FAIL'} — {title}: {detail}")
+        self.checks[cid] = {"title": title, "verdict": "PASS" if ok else "FAIL",
+                            "detail": str(detail)}
+        self._flush()
+        return ok
+
+    @property
+    def failed(self):
+        return [cid for cid, c in sorted(self.checks.items()) if c["verdict"] == "FAIL"]
+
+    def done(self, summary):
+        """Terminal call: write the verdict, then pass or exit non-zero."""
+        failed = self.failed
+        self.status = "fail" if failed else "pass"
+        self.summary = summary
+        self._flush()
+        if failed:
+            print(f"{self.smoke_id} FAILED checks: {failed}")
+            sys.exit(1)
+        print(f"{self.smoke_id} OK: {summary}")
+
+    def _on_exception(self, exc_type, exc, tb):
+        self.status = "fail"
+        self.error = "".join(traceback.format_exception_only(exc_type, exc)).strip()
+        self._flush()
+        traceback.print_exception(exc_type, exc, tb)
+
+    def _flush(self):
+        self.path.write_text(json.dumps({
+            "smoke": self.smoke_id,
+            "status": self.status,
+            "checks": self.checks,
+            "error": self.error,
+            "summary": getattr(self, "summary", None),
+        }, indent=2), encoding="utf-8")

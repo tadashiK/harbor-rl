@@ -1,0 +1,46 @@
+name: Simulator or benchmark support
+description: Report running HARBOR against a simulator it has not been tested on
+labels: [simulator]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        These reports are the highest-value contribution to the project — successes and
+        failures equally. HARBOR's coverage grows by accumulating exactly this evidence.
+
+  - type: input
+    id: sim
+    attributes:
+      label: Simulator or benchmark
+      placeholder: e.g. Isaac Gym, RoboCasa, Orbit fork, in-house simulator
+    validations:
+      required: true
+
+  - type: dropdown
+    id: outcome
+    attributes:
+      label: How far did it get?
+      options:
+        - Environment setup only
+        - Environment + benchmark sanity
+        - RL integration and training
+        - Full task authoring, including reward
+        - Everything, including a trained policy
+    validations:
+      required: true
+
+  - type: textarea
+    id: broke
+    attributes:
+      label: What broke, or what needed hand-editing?
+      description: Which stage, which gate, and what you changed to get past it.
+    validations:
+      required: true
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything simulator-specific worth encoding
+      description: >
+        API quirks, asset formats, contact-model surprises, physics parameters that
+        mattered. This is the material that becomes a reference or an experience entry.

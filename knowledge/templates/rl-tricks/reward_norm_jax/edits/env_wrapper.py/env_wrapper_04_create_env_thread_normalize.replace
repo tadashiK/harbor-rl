@@ -1,0 +1,13 @@
+    """Build the training env. Branches by import availability + env_params from cfg."""
+    task = str(cfg.get("task"))
+    env_params = _resolve_env_params(cfg)
+    normalize_env = bool(cfg.get("normalize_env", False))
+    gamma = float(cfg.get("gamma", cfg.get("algo", {}).get("gamma", 0.99)) if hasattr(cfg, "get") else 0.99)
+    try:
+        import loco_mujoco  # noqa: F401
+        env = _build_loco_mujoco_env(task, env_params, normalize_env, gamma)
+    except ImportError:
+        env = _build_generic_mjx_env(task, env_params, normalize_env, gamma)
+    _assert_mjx_contract(env, task)
+    return env
+

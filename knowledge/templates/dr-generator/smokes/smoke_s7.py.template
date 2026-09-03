@@ -1,0 +1,95 @@
+"""S7 smoke — every effective DR term changes the right quantity by the right amount.
+
+Strategy: collapse each effective physical DR term's sampled range to a POINT interval [k, k]
+(so the sample is exactly k regardless of seed), build the env at num_envs=16, reset, then read the
+property straight off the physics view and assert it equals `default` modified by k:
+    multiplicative (operation="scale")  ->  prop == default * k
+    additive       (operation="add")    ->  prop == default + k
+    direct         (operation="abs")    ->  prop == k
+Physical checks run TWICE — once after the first reset, once after a second reset — to prove the
+randomization re-applies once per episode per env.
+
+Observation-noise terms (group 3) are verified separately by comparing a noisy rollout against a
+paired no-noise cfg (divergence + empirical-std sanity).
+
+Substitutions (agent-filled):
+  {{TASK_ID}}            — gym task id
+  {{POINT_OVERRIDES}}    — collapse each effective group-1/2 term's range to a point [k,k] on `cfg`.
+                            Reset terms (`reset_*`) belong to §3 — do NOT touch them. Record each k.
+  {{PHYS_CHECKS}}        — read each group-1/2 property off the physics view and append a
+                            (name, bool, detail) tuple to `results`. Uses `base`, `torch`. See
+                            isaaclab-dr-reference "Read-back recipes".
+  {{OBS_NOISE_CHECK}}    — optional: build a paired no-noise cfg, roll out, append group-3 verdicts to
+                            `results`. Leave empty if no obs-noise terms were wired.
+"""
+import argparse
+import numpy as np
+import torch
+from isaaclab.app import AppLauncher
+
+parser = argparse.ArgumentParser()
+AppLauncher.add_app_launcher_args(parser)
+args = parser.parse_args([])
+args.headless = True
+args.enable_cameras = False
+sim_app = AppLauncher(args).app
+
+import gymnasium as gym  # noqa: E402
+import isaaclab_tasks    # noqa: F401, E402
+from isaaclab_tasks.utils import parse_env_cfg  # noqa: E402
+
+TASK_ID  = "{{TASK_ID}}"
+NUM_ENVS = 16
+
+results = []   # list of (term_name, ok: bool, detail: str)
+
+
+def _sample_actions(space, n):
+    space.seed(0)
+    a = space.sample()
+    a_t = torch.from_numpy(np.asarray(a)).to("cuda:0")
+    if a_t.ndim == 1:
+        a_t = a_t.unsqueeze(0).expand(n, -1).contiguous()
+    return a_t
+
+
+# --- build the DR env with every effective physical term collapsed to a point interval -------------
+cfg = parse_env_cfg(TASK_ID, device="cuda:0", num_envs=NUM_ENVS, use_fabric=True)
+
+# Each line below pins one §7 group-1/2 term's range to [k, k] and records k for the read-back asserts.
+{{POINT_OVERRIDES}}
+
+env  = gym.make(TASK_ID, cfg=cfg)
+base = env.unwrapped
+
+
+def check_physical(tag):
+    """Read each group-1/2 property off the physics view; append (name, ok, detail) to results."""
+    {{PHYS_CHECKS}}
+
+
+# reset once → reset-mode DR fires per env; verify
+env.reset(seed=0)
+check_physical("after_reset_1")
+
+# step a few times, then reset again → verify DR re-applies once per episode
+act = _sample_actions(env.action_space, NUM_ENVS)
+for _ in range(5):
+    env.step(act)
+env.reset(seed=123)
+check_physical("after_reset_2")
+
+# --- group-3 observation-noise verification (optional) ---------------------------------------------
+{{OBS_NOISE_CHECK}}
+
+env.close()
+
+# --- verdict ---------------------------------------------------------------------------------------
+failed = [r for r in results if not r[1]]
+for name, ok, detail in results:
+    print(f"  [{'OK ' if ok else 'BAD'}] {name}: {detail}")
+assert results, "S7 wired no checks — no effective DR terms verified"
+assert not failed, f"S7 FAIL: {len(failed)}/{len(results)} term checks failed: {[f[0] for f in failed]}"
+
+print(f"S7 OK: {NUM_ENVS} envs, {len(results)} term checks passed (physical exact-value + obs-noise)")
+sim_app.close()

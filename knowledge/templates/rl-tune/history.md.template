@@ -1,0 +1,52 @@
+# RL Tune — {{TUNE_ID}}
+
+- **Repo**: `{{REPO_PATH}}`
+- **Mode**: {{MODE}}
+- **Started (UTC)**: {{STARTED_AT}}
+- **Tasks**: {{TASKS}}
+- **Algorithms**: {{ALGORITHMS}}
+- **Cells (tasks × algorithms)**: {{N_CELLS}}
+- **Metric weights**: `{{METRIC_WEIGHTS_JSON}}`
+- **Stuck threshold**: {{STUCK_THRESHOLD}}
+- **W&B project naming**: `tuning-{{BENCHMARK_NAME}}-<task>-<algorithm>` (one project per cell; run names within each project are sequential `v1`, `v2`, ...)
+- **Layout**: each cell lives at `<tune_dir>/<wandb_project>/` (folder name = W&B project name). The cell's `tuning-history.md`, `result.json`, and `iter_<NNN>/` subdirs all live there.
+
+## Per-cell progress
+
+| Cell | Algorithm | Task | Status | Iters | Baseline score | Best score | Δ return | Δ sample eff | Δ wall-clock | W&B project | Per-cell history |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+{{INITIAL_ROWS}}
+
+(rows updated by the orchestrator as cells complete. `Status` ∈ `pending` / `running` / `done` / `failed`. `Per-cell history` links to the subagent's `tuning-history.md`.)
+
+---
+
+## Final summary
+
+> Filled once every cell has returned (success or failure).
+
+### Overall improvements
+
+| Cell | Δ return | Δ sample efficiency | Δ wall-clock | Tricks kept | Best config |
+|---|---|---|---|---|---|
+{{SUMMARY_ROWS}}
+
+### Tuning techniques applied (across cells)
+
+- **Tricks that helped**: ...
+- **Tricks that didn't help anywhere**: ...
+- **Hyperparameter edits that paid off**: ...
+- **Edits that didn't generalize**: ...
+- **Stop reasons**: <K> cells hit `stuck_threshold`, <M> cells hit `max_iterations`, <F> failed.
+
+### Cross-cell takeaways (3–5 bullets)
+
+Distilled from the per-cell `tuning-history.md` summaries.
+
+- ...
+- ...
+- ...
+
+### Errors
+
+(one row per failed cell with the surfaced error message; "none" if every cell succeeded)

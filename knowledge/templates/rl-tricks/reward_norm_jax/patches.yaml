@@ -1,0 +1,40 @@
+# reward_norm_jax — patch manifest.
+#
+# Wraps the loco-mujoco MJX env stack with NormalizeVecReward when
+# `cfg.normalize_env=true`, and forces it OFF inside eval.py / create_render_env
+# so eval/render rewards stay in raw units (comparable across runs).
+
+file_patches:
+
+  # scripts/env_wrapper.py — 5 atomic edits: docstring, 2× signature, wrap
+  # call, render-env force-off.
+  - file: harbor/scripts/rl/{slug}/env_wrapper.py
+    edits:
+      - id: env_wrapper_01_module_docstring
+        find:    edits/env_wrapper.py/env_wrapper_01_module_docstring.find
+        replace: edits/env_wrapper.py/env_wrapper_01_module_docstring.replace
+      - id: env_wrapper_02_loco_signature_and_normalize_call
+        find:    edits/env_wrapper.py/env_wrapper_02_loco_signature_and_normalize_call.find
+        replace: edits/env_wrapper.py/env_wrapper_02_loco_signature_and_normalize_call.replace
+      - id: env_wrapper_03_generic_signature
+        find:    edits/env_wrapper.py/env_wrapper_03_generic_signature.find
+        replace: edits/env_wrapper.py/env_wrapper_03_generic_signature.replace
+      - id: env_wrapper_04_create_env_thread_normalize
+        find:    edits/env_wrapper.py/env_wrapper_04_create_env_thread_normalize.find
+        replace: edits/env_wrapper.py/env_wrapper_04_create_env_thread_normalize.replace
+      - id: env_wrapper_05_render_env_force_off
+        find:    edits/env_wrapper.py/env_wrapper_05_render_env_force_off.find
+        replace: edits/env_wrapper.py/env_wrapper_05_render_env_force_off.replace
+
+  # scripts/eval.py — force normalize_env=false at eval (unbiased steady-state).
+  - file: harbor/scripts/rl/{slug}/eval.py
+    edits:
+      - id: eval_01_force_normalize_off
+        find:    edits/eval.py/eval_01_force_normalize_off.find
+        replace: edits/eval.py/eval_01_force_normalize_off.replace
+
+# Config patches: add `normalize_env: true` to each algorithm's parallel.yaml.
+config_patches:
+  - file: harbor/configs/rl/{algo}.parallel.yaml
+    key: normalize_env
+    value: true

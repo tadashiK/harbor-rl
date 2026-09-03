@@ -1,0 +1,90 @@
+"""S3 smoke (visual pass) — what the reset layout LOOKS like.
+
+The numeric pass proves the layout is the one you asked for. It cannot tell you the layout is
+wrong: a mug whose handle faces away from the rack, a cube behind the arm's shoulder, a drawer
+whose front is inside the table — every one of those reads back exactly as configured and
+reports five green checks. Only a picture shows it.
+
+So: reset the env several times, capture the frame each reset produces, write them as PNGs, and
+verify mechanically that frames were captured at all. The judgement itself is the agent's —
+open the PNGs and check them against §1's *desired robot behavior* and *potential failures*.
+
+Camera: THE SHARED HARBOR FRAMING, identical to render.py and smoke_s6_render.py. Do not invent
+a per-task angle — the whole value of a fixed camera is that layouts from different tasks and
+different attempts are comparable by eye.
+
+Substitutions:
+  TASK_ID     — gym task id
+  NUM_ENVS    — envs to build (2 for gpu-sim)
+  N_RESETS    — how many resets to capture (default 4; more only helps once §7 adds DR)
+  FRAMES_DIR  — where the PNGs go, e.g. <task_dir>/smoke_s3_frames
+"""
+import argparse
+import sys
+
+# Kit's shutdown can kill the process before stdout flushes, losing the
+# `S<N> OK:` verdict line that IS this smoke's pass criterion.
+sys.stdout.reconfigure(line_buffering=True)
+from _verdict import Verdict   # noqa: E402  — sibling module, rendered alongside
+V = Verdict("S3-visual")
+from pathlib import Path
+
+import numpy as np
+from isaaclab.app import AppLauncher
+
+parser = argparse.ArgumentParser()
+AppLauncher.add_app_launcher_args(parser)
+args = parser.parse_args([])
+args.headless = True
+args.enable_cameras = True          # required for headless rgb_array capture
+sim_app = AppLauncher(args).app
+
+import gymnasium as gym  # noqa: E402
+import isaaclab_tasks    # noqa: F401, E402
+from isaaclab_tasks.utils import parse_env_cfg  # noqa: E402
+
+TASK_ID = "{{TASK_ID}}"
+NUM_ENVS = {{NUM_ENVS}}
+N_RESETS = {{N_RESETS}}
+FRAMES_DIR = Path("{{FRAMES_DIR}}")
+
+cfg = parse_env_cfg(TASK_ID, device="cuda:0", num_envs=NUM_ENVS, use_fabric=True)
+cfg.viewer.origin_type = "env"
+cfg.viewer.env_index = 0
+cfg.viewer.eye = (2.5, 2.5, 1.6)
+cfg.viewer.lookat = (0.30, 0.0, 0.4)
+
+env = gym.make(TASK_ID, cfg=cfg, render_mode="rgb_array")
+
+frames = []
+for i in range(N_RESETS):
+    env.reset(seed=i)
+    frame = env.render()
+    if frame is not None:
+        frames.append(np.asarray(frame, dtype=np.uint8))
+
+V.check("V1", "frames captured", len(frames) == N_RESETS,
+        f"{len(frames)}/{N_RESETS} resets produced a frame"
+        + ("" if len(frames) == N_RESETS else " — check enable_cameras / render_mode"))
+
+# An all-black or uniformly flat frame means the camera is pointing at nothing: the render
+# succeeded and shows no scene, which reads as "captured" without being inspectable.
+spreads = [float(f.astype(np.int16).std()) for f in frames]
+V.check("V2", "frames are not blank", bool(spreads) and min(spreads) > 5.0,
+        f"pixel std per frame: {[round(s, 1) for s in spreads]} (>5 means something is in view)")
+
+FRAMES_DIR.mkdir(parents=True, exist_ok=True)
+try:
+    import imageio.v2 as imageio
+except ImportError:
+    import imageio  # type: ignore[no-redef]
+for i, frame in enumerate(frames):
+    imageio.imwrite(str(FRAMES_DIR / f"reset_{i:02d}.png"), frame)
+
+# V.done() BEFORE the teardown: Kit's shutdown can kill the process, and anything after
+# sim_app.close() may never run — including the `S3 OK:` line that IS the pass criterion.
+V.done(f"wrote {len(frames)} reset frames to {FRAMES_DIR}. Agent: OPEN THEM. Check each against "
+       f"§1's desired behavior and potential failures — reachability, orientation, clearance, "
+       f"nothing intersecting, nothing floating.")
+env.close()
+sim_app.close()

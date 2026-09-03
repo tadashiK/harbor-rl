@@ -1,0 +1,14 @@
+# value_clip_torch — patches custom_torch ppo.py::update_net to use the
+# PPO clipped value loss when cfg.algo.value_clip is true.
+
+file_patches:
+  - file: harbor/scripts/rl/{slug}/algo/ppo.py
+    edits:
+      - id: ppo_01_clipped_value_loss
+        find:    edits/ppo.py/ppo_01_clipped_value_loss.find
+        replace: edits/ppo.py/ppo_01_clipped_value_loss.replace
+
+config_patches:
+  - file: harbor/configs/rl/{algo}.parallel.yaml
+    key: value_clip
+    value: true

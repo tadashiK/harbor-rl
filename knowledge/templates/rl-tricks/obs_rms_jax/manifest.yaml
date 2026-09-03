@@ -1,0 +1,24 @@
+name: obs_rms_jax
+description: |
+  In-network RunningMeanStd observation normalization. Welford-updates from the
+  rollout batch each step; frozen during gradient compute. Big perf win on
+  high-dim physical-state obs (joints, velocities) where raw scales differ widely.
+  +51% return at 10M on UnitreeGo2/LocomotionReward (custom_jax PPO).
+
+algorithms: [ppo, sac, td3]
+backend: custom_jax
+
+references:
+  - loco_mujoco/algorithms/common/networks.py     # RunningMeanStd reference
+  - loco_mujoco/algorithms/ppo_jax.py             # apply with mutable=['run_stats']
+
+caveats:
+  - "off-policy: SAC + TD3 work, but the actor's RMS only updates during rollout;
+    critic RMS is synced from actor after each rollout iter (single source of stats)."
+  - "obs already normalized: skip this trick if your obs are pre-scaled (e.g. image
+    features, hand-normalized joints)."
+
+# The actual code/config patches live in patches.yaml — applied by
+# scripts/rl-tricks/apply_trick.py. The default custom_jax template is
+# trick-free; this trick injects the implementation.
+patches: patches.yaml

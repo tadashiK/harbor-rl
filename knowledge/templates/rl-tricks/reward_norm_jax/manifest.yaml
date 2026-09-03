@@ -1,0 +1,25 @@
+name: reward_norm_jax
+description: |
+  NormalizeVecReward env wrapper — divides reward by sqrt(running_var) of
+  returns. On UnitreeGo2/LocomotionReward (11 weighted shaping terms), this
+  trick gives +59% return at 10M (custom_jax PPO). The training-time return
+  tracker still reads RAW values (LogWrapper sits inside the norm wrapper);
+  /harbor:rl-eval forces normalize_env=false for unbiased eval comparison.
+
+algorithms: [ppo, sac, td3]
+backend: custom_jax
+
+references:
+  - loco_mujoco/core/wrappers/mjx.py:NormalizeVecReward
+  - loco_mujoco/algorithms/ppo_jax.py:_wrap_env  # how the reference wraps it
+
+caveats:
+  - "off-policy (SAC/TD3): replay buffer accumulates rewards under SHIFTING
+    normalization regimes; can destabilize Q-learning. Prefer cfg.algo.reward_scale
+    for SAC/TD3 reward scaling instead."
+  - "sparse / single-term rewards: this trick can HURT (we observed it on
+    TargetVelocityGoalReward — keep off in that case)."
+
+# The actual code/config patches live in patches.yaml — applied by
+# scripts/rl-tricks/apply_trick.py.
+patches: patches.yaml

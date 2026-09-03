@@ -1,0 +1,53 @@
+cff-version: 1.2.0
+message: "If you use HARBOR in your research, please cite the paper below."
+title: "HARBOR: A Harness Framework for Agentic Robot Reinforcement Learning"
+abstract: >-
+  HARBOR is an agentic framework that frames robot RL automation as a
+  harness-engineering problem: given a simulator codebase and a task
+  specification, it automates the workflow from environment setup to policy
+  training in simulation.
+type: software
+license: Apache-2.0
+repository-code: "https://github.com/supersglzc/harbor-rl"
+keywords:
+  - reinforcement learning
+  - robotics
+  - large language models
+  - agentic systems
+  - sim-to-real
+authors:
+  - family-names: Li
+    given-names: Zechu
+  - family-names: Jin
+    given-names: Yufeng
+  - family-names: Liu
+    given-names: Xiaoyang
+  - family-names: Liu
+    given-names: Puze
+  - family-names: Prasad
+    given-names: Vignesh
+  - family-names: D'Eramo
+    given-names: Carlo
+  - family-names: Chalvatzaki
+    given-names: Georgia
+preferred-citation:
+  type: article
+  title: "HARBOR: A Harness Framework for Agentic Robot Reinforcement Learning"
+  year: 2026
+  journal: "arXiv preprint arXiv:2606.08610"
+  url: "https://arxiv.org/abs/2606.08610"
+  authors:
+    - family-names: Li
+      given-names: Zechu
+    - family-names: Jin
+      given-names: Yufeng
+    - family-names: Liu
+      given-names: Xiaoyang
+    - family-names: Liu
+      given-names: Puze
+    - family-names: Prasad
+      given-names: Vignesh
+    - family-names: D'Eramo
+      given-names: Carlo
+    - family-names: Chalvatzaki
+      given-names: Georgia

@@ -1,0 +1,30 @@
+"""
+{{PROJECT_NAME}} — training shim for local implementation `{{LOCAL_IMPL_SLUG}}`.
+
+Thin pass-through: delegates to `python -m {{LOCAL_IMPL_SLUG}}.train` with all CLI args
+forwarded. Edit the module path below if your package uses a different entry name
+(e.g. `{{LOCAL_IMPL_SLUG}}.scripts.train_baselines`).
+
+The unified hydra config at harbor/configs/rl/<algo>.yaml is passed through as CLI overrides
+so your package's hydra entry point sees the same fields.
+
+Example:
+    python harbor/scripts/rl/{{LOCAL_IMPL_SLUG}}/train.py algo=ppo task={{DEFAULT_TASK}} \\
+        total_timesteps=1_000_000
+"""
+from __future__ import annotations
+
+import subprocess
+import sys
+
+ENTRY_MODULE = "{{LOCAL_IMPL_SLUG}}.train"   # edit if your package uses a different entry
+
+
+def main():
+    cmd = [sys.executable, "-m", ENTRY_MODULE, *sys.argv[1:]]
+    print(f"[shim] $ {' '.join(cmd)}", flush=True)
+    sys.exit(subprocess.call(cmd))
+
+
+if __name__ == "__main__":
+    main()

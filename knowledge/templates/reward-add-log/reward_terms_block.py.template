@@ -1,0 +1,88 @@
+# --- /harbor:reward-add-log block — per-term reward visibility, composer-aware ---
+# Inserted by the /harbor:reward-add-log skill. The wrapper does NOT change the env's
+# native reward — it only emits per-term values on info["detailed_reward"] and
+# asserts that `composer(terms.values()) == env_reward` per step.
+#
+# Composer choices:
+#   - "sum"     — env reward = Σ terms (IsaacLab RewardManager pattern, most
+#                 ManagerBasedRLEnv tasks). The dm_env tasks that wrap a
+#                 weighted-sum reward also use "sum".
+#   - "product" — env reward = ∏ terms (dm_control cartpole / walker /
+#                 humanoid all multiply tolerance terms; choose "product"
+#                 whenever the native reward is `f1(x)*f2(x)*...`).
+#
+# Earlier drafts of this wrapper REPLACED env_reward with Σ weight_i * term_i.
+# That silently re-shaped multiplicative tasks (the policy learned to max the
+# easy terms while abandoning the hard one). This version is read-only.
+
+# task_id prefix → fn(sparse_flag) -> ([(name, term_fn(physics)), ...], composer)
+# Filled in by /harbor:reward-add-log.
+_REWARD_TERM_SPECS: dict = {
+    # "cartpole/": _cartpole_term_specs,
+}
+
+
+def _select_term_specs(task_id: str):
+    for prefix, fn in _REWARD_TERM_SPECS.items():
+        if task_id.startswith(prefix):
+            return fn(task_id.endswith("_sparse"))
+    return None, None
+
+
+def _compose(values, composer: str) -> float:
+    if composer == "sum":
+        return float(sum(values))
+    if composer == "product":
+        out = 1.0
+        for v in values:
+            out *= float(v)
+        return out
+    raise ValueError(f"unknown composer {composer!r} (use 'sum' or 'product')")
+
+
+def _make_detailed_reward_wrapper():
+    """Build the gym.Wrapper class lazily — gymnasium isn't imported at module load."""
+    import gymnasium as gym
+
+    class _DetailedRewardWrapper(gym.Wrapper):
+        """Per-term reward visibility wrapper.
+
+        Each step:
+          1. Take env's native (obs, reward, ...) — UNCHANGED.
+          2. Compute named terms from physics: terms = {name_i: fn_i(physics)}.
+          3. Verify composer(terms.values()) == reward (assertion).
+          4. Stash terms on info["detailed_reward"] for downstream loggers.
+
+        Tasks without a registered spec are passthrough — env reward
+        unchanged, info["detailed_reward"] = {"total": reward}.
+        """
+        def __init__(self, env, task_id: str):
+            super().__init__(env)
+            self._task_id = task_id
+            self._term_specs, self._composer = _select_term_specs(task_id)
+
+        def step(self, action):
+            obs, env_rew, term, trunc, info = self.env.step(action)
+            info = dict(info) if isinstance(info, dict) else {}
+            if self._term_specs is None:
+                info["detailed_reward"] = {"total": float(env_rew)}
+                return obs, env_rew, term, trunc, info
+
+            phys = self.env.unwrapped._env.physics  # adjust accessor per benchmark
+            terms: dict = {name: float(fn(phys)) for name, fn in self._term_specs}
+            composed = _compose(terms.values(), self._composer)
+            assert abs(composed - float(env_rew)) < 1e-6, (
+                f"detailed_reward {self._composer} mismatch for {self._task_id}: "
+                f"env_reward={float(env_rew):.10g} {self._composer}(terms)={composed:.10g} "
+                f"diff={float(env_rew) - composed:+.3e} terms={terms}"
+            )
+            info["detailed_reward"] = terms
+            info["reward_composer"] = self._composer
+            return obs, env_rew, term, trunc, info
+
+    return _DetailedRewardWrapper
+
+# Wrap your env factory's return value:
+#     base = <existing env construction>
+#     return _make_detailed_reward_wrapper()(base, task_id)
+# --- end /harbor:reward-add-log block ---

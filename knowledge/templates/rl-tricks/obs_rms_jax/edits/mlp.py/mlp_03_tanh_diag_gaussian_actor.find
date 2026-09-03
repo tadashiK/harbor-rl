@@ -1,0 +1,13 @@
+
+
+class TanhDeterministicActor(nn.Module):
+    """TD3 actor — deterministic, tanh-bounded."""
+    action_dim: int
+    hidden_dims: Sequence[int] = (256, 256)
+    activation: str = "relu"
+
+    @nn.compact
+    def __call__(self, x):
+        x = MLP(self.hidden_dims, self.action_dim, self.activation,
+                output_init_scale=0.01)(x)
+        return jnp.tanh(x)

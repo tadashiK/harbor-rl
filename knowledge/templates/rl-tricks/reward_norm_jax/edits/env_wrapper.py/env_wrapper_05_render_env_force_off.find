@@ -1,0 +1,11 @@
+
+    For loco-mujoco the same VecEnv works with num_envs=1; for other benchmarks
+    you may need a render-mode-enabled variant. Default = same as create_env
+    with num_envs forced to 1 inside cfg.
+    """
+    from omegaconf import OmegaConf
+    cfg = OmegaConf.create(OmegaConf.to_container(cfg, resolve=True))
+    cfg.num_envs = 1
+    return create_env(cfg)
+
+

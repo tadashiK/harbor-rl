@@ -1,0 +1,7 @@
+            returns = advantages + values
+            if self.value_rms is not None:
+                self.value_rms.update(returns.reshape(-1))
+                returns = self.value_rms.normalize(returns)
+                self.value_rms.update(values.reshape(-1))
+                values = self.value_rms.normalize(values)
+        return obs, actions, logprobs, advantages, returns, values

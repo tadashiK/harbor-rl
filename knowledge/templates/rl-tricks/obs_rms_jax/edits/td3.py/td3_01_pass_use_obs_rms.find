@@ -1,0 +1,11 @@
+        super().__post_init__()
+        hidden = tuple(self.cfg.algo.get("hidden_dims", (256, 256)))
+        activation = str(self.cfg.algo.get("activation", "relu"))
+
+        self.actor_net = TanhDeterministicActor(
+            action_dim=self.action_dim, hidden_dims=hidden, activation=activation,
+        )
+        self.critic_net = DoubleQ(hidden_dims=hidden, activation=activation)
+
+        keys = self.split(3)
+        dummy_obs = jnp.zeros((1, self.obs_dim))

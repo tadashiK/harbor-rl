@@ -1,0 +1,12 @@
+# obs_rms_torch — flag flip only.
+# The custom_torch tree ships RunningMeanStd in utils/torch_util.py and the
+# `if self.obs_rms is not None: obs = self.obs_rms.normalize(obs)` branches
+# in ac_base / ppo / sac / td3, gated on cfg.algo.obs_norm. This trick just
+# guarantees the flag is on for each algorithm's parallel.yaml.
+
+file_patches: []
+
+config_patches:
+  - file: harbor/configs/rl/{algo}.parallel.yaml
+    key: obs_norm
+    value: true

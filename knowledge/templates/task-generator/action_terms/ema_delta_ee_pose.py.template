@@ -1,0 +1,197 @@
+"""EMA cumulative-delta task-space (EE pose) action.
+
+Rendered by task-generator when the user picks `ema_delta_ee_pose` as the §2
+action mode. The EE-pose analog of `EMACumulativeRelativeJointPositionAction`.
+
+The policy outputs a 6-D delta `(dx, dy, dz, drx, dry, drz)` per step. The action
+term:
+
+    1. Accumulates deltas over the episode: `delta_t = delta_{t-1} + s · a_t`
+    2. If position limits are set, clamps the cumulative position-delta so the
+       absolute target stays inside the box:
+           delta_t[:3] = clamp(delta_t[:3],
+                               pos_lower - q_init.pos,
+                               pos_upper - q_init.pos)
+       Why the delta-side clamp (in addition to the per-step target clamp in
+       step 4): without it, `delta_t[:3]` grows unbounded whenever the policy
+       commands past the workspace boundary. The absolute target gets clipped
+       each step (good for IK), but `delta` keeps drifting, and a reversing
+       action has to burn through the accumulated overshoot before any motion
+       resumes — a latency that the delta clamp removes.
+    3. Anchors on the EE pose captured at `env.reset()`:
+           abs_pos_t  = q_init.pos  + delta_t[:3]
+           abs_quat_t = q_init.quat ⊗ axis_angle_to_quat(delta_t[3:6])
+    4. EMA-smooths against the previously applied pose target (linear blend on
+       the 7-D pose, then quat re-normalization):
+           target_t = α · (abs_pos_t, abs_quat_t) + (1 - α) · target_{t-1}
+           target_t.quat /= ‖target_t.quat‖
+    5. Optionally clamps the position component to per-axis limits (defensive
+       — init pose may sit outside the box).
+    6. Forwards the absolute pose target to the IK controller (forced into
+       `use_relative_mode=False` regardless of cfg) and reuses the parent's
+       `apply_actions()` for jacobian + IK numerics each sim step.
+
+State carried across steps: `delta` (6-D), `prev_applied_pose` (7-D pos+quat).
+On `env.reset()`: `delta := 0`, `prev_applied_pose := q_init`.
+
+At t=0 (post-reset, with `prev_applied == q_init`, `delta_{-1} == 0`):
+
+    target_0.pos  = q_init.pos + α · (s[:3] · a_0[:3])              (before clamp)
+    target_0.quat = slerp_lin(q_init.quat,
+                              q_init.quat ⊗ aaq(s[3:6] · a_0[3:6]),
+                              α)                                    (re-normalized)
+"""
+from __future__ import annotations
+
+import torch
+from collections.abc import Sequence
+from typing import TYPE_CHECKING
+
+from isaaclab.envs.mdp.actions.task_space_actions import DifferentialInverseKinematicsAction
+from isaaclab.utils.math import quat_from_angle_axis, quat_mul
+
+if TYPE_CHECKING:
+    from isaaclab.envs import ManagerBasedEnv
+
+    from . import actions_cfg
+
+
+class EMACumulativeDeltaPoseAction(DifferentialInverseKinematicsAction):
+    cfg: "actions_cfg.EMACumulativeDeltaPoseActionCfg"
+
+    def __init__(
+        self,
+        cfg: "actions_cfg.EMACumulativeDeltaPoseActionCfg",
+        env: "ManagerBasedEnv",
+    ) -> None:
+        # Force the IK controller into absolute mode — we manage relative deltas ourselves.
+        if cfg.controller.use_relative_mode:
+            raise ValueError(
+                "EMACumulativeDeltaPoseAction handles relative deltas itself; "
+                "set controller.use_relative_mode=False"
+            )
+        super().__init__(cfg, env)
+
+        # Override the policy-input action shape to 6 (pos delta + axis-angle rot delta).
+        # The parent's `action_dim` property is overridden by ours to return 6, so
+        # the parent allocated `_raw_actions` and `_processed_actions` as 6-D.
+        # We need: 6-D for raw_actions / scale (policy interface), 7-D for
+        # _processed_actions (IK controller in abs pose mode expects 7-D pose).
+        self._raw_actions = torch.zeros(env.num_envs, 6, device=env.device)
+        self._processed_actions = torch.zeros(env.num_envs, 7, device=env.device)
+        self._scale = torch.zeros((env.num_envs, 6), device=env.device)
+        self._scale[:] = torch.tensor(cfg.scale, device=env.device)
+
+        # Alpha (EMA weight)
+        if not 0.0 <= cfg.alpha <= 1.0:
+            raise ValueError(f"alpha must be in [0, 1]. Got {cfg.alpha}.")
+        self._alpha = cfg.alpha
+
+        # Cumulative delta state (6-D)
+        self.del_action = torch.zeros((env.num_envs, 6), device=env.device)
+
+        # init pose buffers — populated lazily on the next process_actions for any
+        # env in `_needs_reanchor`. We CANNOT capture init pose here at __init__
+        # (or in reset()) because at those call sites the articulation's body
+        # data is stale — IsaacLab's ManagerBasedRLEnv runs the post-reset sim
+        # step AFTER all term.reset() calls, so reading body_pose_w from inside
+        # reset() returns the pre-reset EE pose. Deferring to process_actions
+        # means we read body_pose_w once it's been refreshed by the env's
+        # internal post-reset step.
+        self.init_ee_pos        = torch.zeros((env.num_envs, 3), device=env.device)
+        self.init_ee_quat       = torch.zeros((env.num_envs, 4), device=env.device)
+        self.init_ee_quat[:, 0] = 1.0                                                  # identity quat (wxyz)
+        self._prev_applied_pose = torch.zeros((env.num_envs, 7), device=env.device)
+        self._prev_applied_pose[:, 3] = 1.0
+        # Mark all envs for re-anchoring on first process_actions
+        self._needs_reanchor    = torch.ones(env.num_envs, dtype=torch.bool, device=env.device)
+
+        # Optional position clamp (per-axis lower/upper)
+        self.pos_lower_limit = (
+            torch.tensor(cfg.pos_lower_limit, device=self.device)
+            if cfg.pos_lower_limit is not None
+            else None
+        )
+        self.pos_upper_limit = (
+            torch.tensor(cfg.pos_upper_limit, device=self.device)
+            if cfg.pos_upper_limit is not None
+            else None
+        )
+
+    # The policy sees a 6-D action; the IK command is 7-D (handled internally).
+    @property
+    def action_dim(self) -> int:
+        return 6
+
+    def reset(self, env_ids: Sequence[int] | None = None) -> None:
+        super().reset(env_ids)
+        # Defer init_ee_pos refresh — articulation body_pose_w is stale at this
+        # call site. Mark these envs so the NEXT process_actions re-anchors
+        # against fresh post-reset data.
+        if env_ids is None:
+            self._needs_reanchor[:] = True
+            self.del_action[:]      = 0.0
+        else:
+            self._needs_reanchor[env_ids] = True
+            self.del_action[env_ids]      = 0.0
+
+    def process_actions(self, actions: torch.Tensor) -> None:
+        # Re-anchor init pose for any env that just reset. body_pose_w is now
+        # fresh (the env's post-reset sim step has run since reset()).
+        if self._needs_reanchor.any():
+            ee_pos_curr, ee_quat_curr = self._compute_frame_pose()
+            mask = self._needs_reanchor
+            self.init_ee_pos[mask]            = ee_pos_curr[mask]
+            self.init_ee_quat[mask]           = ee_quat_curr[mask]
+            self._prev_applied_pose[mask, :3] = ee_pos_curr[mask]
+            self._prev_applied_pose[mask, 3:7] = ee_quat_curr[mask]
+            self._needs_reanchor[:]           = False
+
+        # Store raw 6-D action and apply scale
+        self._raw_actions[:] = actions
+        scaled = actions * self._scale  # (N, 6)
+
+        # Cumulative delta over the episode
+        self.del_action += scaled
+
+        # Clamp the cumulative position-delta so `init + delta[:3] ∈ [lower, upper]`.
+        # This stops `delta[:3]` from drifting past the workspace boundary;
+        # otherwise the absolute target still gets clipped each step (in the
+        # post-EMA defensive clamp below) but `delta[:3]` keeps growing, and a
+        # reversing action has to burn through the accumulated overshoot before
+        # any EE motion resumes.
+        if self.pos_lower_limit is not None and self.pos_upper_limit is not None:
+            del_lower = self.pos_lower_limit - self.init_ee_pos
+            del_upper = self.pos_upper_limit - self.init_ee_pos
+            self.del_action[:, :3] = torch.clamp(self.del_action[:, :3], del_lower, del_upper)
+
+        # Convert (delta_pos, delta_rot_axis_angle) → absolute (pos, quat) target
+        abs_pos = self.init_ee_pos + self.del_action[:, :3]
+        rot_aa  = self.del_action[:, 3:6]
+        angle   = torch.norm(rot_aa, dim=-1)
+        axis    = torch.where(
+            angle.unsqueeze(-1) > 1e-9,
+            rot_aa / (angle.unsqueeze(-1) + 1e-12),
+            torch.zeros_like(rot_aa),
+        )
+        rot_quat = quat_from_angle_axis(angle, axis)
+        abs_quat = quat_mul(self.init_ee_quat, rot_quat)
+        abs_pose = torch.cat([abs_pos, abs_quat], dim=-1)  # (N, 7)
+
+        # EMA on the 7-D pose vector (linear blend, then quat re-normalization)
+        ema_pose = self._alpha * abs_pose + (1.0 - self._alpha) * self._prev_applied_pose
+        ema_pose[:, 3:7] = ema_pose[:, 3:7] / (
+            torch.norm(ema_pose[:, 3:7], dim=-1, keepdim=True) + 1e-12
+        )
+
+        # Optional per-axis position clamp
+        if self.pos_lower_limit is not None and self.pos_upper_limit is not None:
+            ema_pose[:, :3] = torch.clamp(ema_pose[:, :3], self.pos_lower_limit, self.pos_upper_limit)
+
+        # Store the 7-D absolute pose target for IK + inspection
+        self._processed_actions[:] = ema_pose
+        self._prev_applied_pose[:] = ema_pose
+
+        # Hand off to the IK controller in absolute mode
+        ee_pos_curr, ee_quat_curr = self._compute_frame_pose()
+        self._ik_controller.set_command(self._processed_actions, ee_pos_curr, ee_quat_curr)

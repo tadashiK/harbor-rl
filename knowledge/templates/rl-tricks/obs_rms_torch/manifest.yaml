@@ -1,0 +1,24 @@
+name: obs_rms_torch
+description: |
+  Welford running-mean/std observation normalization for the custom_torch
+  algorithm tree. Default-on in the rendered scaffold; this trick is the
+  documented entry-point that explicitly flips `obs_norm: true` on
+  ppo/sac/td3 parallel.yaml configs (so it survives subsequent edits) and
+  verifies the RunningMeanStd numerics through a self-contained smoke.
+
+  Reference: the built-in custom_torch PPO — `if self.cfg.algo.obs_norm: obs = self.obs_rms.normalize(obs)`.
+
+algorithms: [ppo, sac, td3]
+backend: custom_torch
+
+references:
+  - custom_torch PPO            # `obs_norm` cfg flag
+  - knowledge/templates/rl-integration-generator/custom_torch/utils/torch_util.py.template   # RunningMeanStd
+  - knowledge/templates/rl-integration-generator/custom_torch/algo/ac_base.py.template       # builds self.obs_rms
+
+caveats:
+  - "Skip if obs are already normalized at the env layer (image features, hand-scaled joints) — RMS will fight the env-side normalizer."
+  - "GPU-batched envs: the rollout batch updates RMS every step, which is correct; the eval-only path also normalizes via the same stats so eval matches train."
+
+# All patches live in patches.yaml. Smoke at smoke.py.
+patches: patches.yaml

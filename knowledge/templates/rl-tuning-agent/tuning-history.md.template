@@ -1,0 +1,125 @@
+# Tuning History — {{ALGORITHM}} on {{TASK}}
+
+- **Tune dir**: `{{TUNE_DIR}}`
+- **Mode**: {{MODE}}
+- **Started (UTC)**: {{STARTED_AT}}
+- **Metric weights**: `{{METRIC_WEIGHTS_JSON}}`
+- **Stuck threshold**: {{STUCK_THRESHOLD}} consecutive non-improving iterations
+- **Default config**: `{{DEFAULT_CONFIG_PATH}}`
+- **Suite spec**: `{{SUITE_SPEC_PATH}}` (algorithm_slug = `{{ALGORITHM_SLUG}}`)
+- **W&B project**: `{{WANDB_PROJECT}}` (run names: `v<N>_<change_slug>` — e.g. `v1_baseline`, `v2_obs_rms`, `v3_lr_halved`)
+
+## Iterations (index)
+
+At-a-glance row per iteration. The full reasoning lives in the per-iteration sections below; this table is just for fast scanning.
+
+| # | W&B run | Phase | Candidate (one-line label) | Score | Final return | Sample eff | Wall-clock (s) | Status |
+|---|---|---|---|---|---|---|---|---|
+| 0 | v1_baseline | baseline | (default config) |  |  |  |  | pending |
+
+`Status` ∈ `running` / `done` / `rejected` / `failed`.
+
+## Running best
+
+(updated in place after each iteration — points to `iter_<NNN>/` whose score is currently highest)
+
+---
+
+## Per-iteration log
+
+> The agent appends ONE section per iteration here, in order. Each section is the full audit trail for that iteration: why this candidate, what the post-run analysis showed, and what was decided. Trials always run to completion; the agent does NOT inspect anything mid-flight. The index table above is updated in the same write.
+
+### Iteration 0 — v1_baseline (baseline)
+
+#### Rationale
+
+This is the baseline; runs the unmodified default config. Establishes the reference curve for all subsequent comparisons.
+
+#### Config diff vs parent
+
+N/A — this IS the parent.
+
+#### Analysis
+
+- final_return = ...
+- sample_efficiency = ... env_steps to first crossing of 0.8 × final_return
+- wall_clock_sec = ...
+- log signals (read from the final `metrics.jsonl`): entropy=..., train_loss=..., value_loss=..., NaN count=0
+- plateau check: ... (constraint #2)
+
+#### Decision
+
+**Accepted as baseline.** Stuck counter: 0. Phase 1 begins next; the first trick to try is `<...>` because `<reason from tuning-experience>`.
+
+---
+
+### Iteration N — v<N+1>_<change_slug> (<phase>: <one-line label>)
+
+> Template for every subsequent iteration. Copy this block, fill it in, append below the previous one. Do NOT mutate earlier iteration sections — append-only.
+
+#### Rationale
+
+Why this candidate was chosen. Cite the specific heuristic from `tuning-instruction.md` / `tuning-experience.md` that prompted it, plus any signal from the previous iteration's metrics. 2–4 sentences. Be explicit about the hypothesis ("doubling batch_size to 16384 should reduce train_loss noise observed in v3").
+
+#### Config diff vs parent
+
+- key: old_value → new_value
+- key: old_value → new_value
+
+(If a trick was applied: `trick: <name>` plus the resulting yaml flips.)
+
+#### Analysis
+
+- final_return = <x> (vs running best <y>, Δ = <pct>)
+- sample_efficiency = <env_steps_to_threshold> (Δ = <pct>)
+- wall_clock_sec = <x> (Δ = <pct>)
+- log signals: entropy=<...>, train_loss=<...>, value_loss=<...>, NaN count=<...>
+- behavior notes (if applicable from rendered video / curves)
+
+#### Decision
+
+**<Accepted | Rejected | Failed>.** Stuck counter: <N>. One sentence on why. One sentence on what to try next iteration (or "stop — stuck threshold reached").
+
+---
+
+## Final summary
+
+> Filled at Phase 3 once the loop stops.
+
+### Best vs baseline
+
+|  | Baseline (iter 0) | Best (iter N) | Δ |
+|---|---|---|---|
+| Score |  |  |  |
+| Final return |  |  |  |
+| Sample efficiency |  |  |  |
+| Wall-clock (s) |  |  |  |
+
+### Tuning techniques applied
+
+- Tricks kept: ...
+- Tricks discarded: ...
+- Hyperparameter edits that helped: ...
+- Hyperparameter edits that didn't: ...
+
+### Best config record (read by /harbor:rl-tune for the final sweep)
+
+- `best_iter`: `iter_<NNN>/`
+- `best_overrides_path`: `iter_<NNN>/overrides.yaml`
+- `best_total_timesteps`: <int>
+- Resolved Hydra command:
+  ```bash
+  .venv/bin/python harbor/scripts/rl/<slug>/train.py \
+    --config-name=<algo>.parallel task=<task> \
+    <override_tokens...>
+  ```
+
+### Takeaways (3–5 bullets)
+
+- ...
+- ...
+
+> Novel takeaways likely to generalize across tasks → list them as strings in
+> `result.json:novel_heuristics`. The user can review these post-tune via
+> `jq '.novel_heuristics' <cell_dir>/result.json`. Do NOT modify
+> `tuning-experience.md` from this subagent.

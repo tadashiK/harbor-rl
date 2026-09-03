@@ -1,0 +1,212 @@
+"""S4 smoke — every implemented predicate fires when, and only when, it should.
+
+§4 authors a set of predicates: the subgoals it chose to implement, the final success
+condition, and every termination term. This smoke tests each of them **one by one**, and each
+one twice:
+
+  C<i>  numeric — predicate <i> is FALSE at the start state and TRUE once the scene is driven
+                  into the state that should trigger it
+  V<i>  visual  — a keyframe of that forced state, captured BEFORE the confirming step (the
+                  auto-reset would otherwise replace it), written to FRAMES_DIR for the agent
+
+So N implemented predicates produce 2N checks. The pairing is the point. A numeric pass alone
+says a predicate fired in a state you constructed — not that the state you constructed is the
+one you meant. A success predicate satisfiable by a mug resting *beside* the peg passes every
+assertion and then reports an inflated success_rate for a whole tuning run. The keyframe is how
+that gets caught, and it costs one render per predicate.
+
+The FALSE-at-start half of each C<i> is not a formality: a predicate that is always true is the
+single most expensive §4 bug, because §6 will happily optimise against it for hours.
+
+One further check, outside the 2N:
+
+  G1  the goal is sampled deterministically and (if §5 exposes it) appears in the observation
+      at the right slice
+
+Substitutions:
+  TASK_ID              — gym task id
+  NUM_ENVS             — envs to build (2 for gpu-sim)
+  FRAMES_DIR           — where the per-predicate PNGs go, e.g. <task_dir>/smoke_s4_frames
+  GOAL_OVERRIDES_BLOCK — lines pinning cfg.commands.<name>.ranges.* to point intervals
+  GOAL_CHECK_BLOCK     — the G1 goal assertion, as `expect_goal(name, condition, detail)` calls.
+                         NOT every task has a CommandManager: `commands = None` (implicit fixed
+                         goal) is a standard manipulation idiom — the task-library's
+                         insert-drawer base uses it — and for those tasks
+                         `unw.command_manager.get_command(...)` does not exist. Two shapes:
+                             # command-manager task
+                             EXPECTED_GOAL = torch.tensor([...], device=unw.device)
+                             sampled = unw.command_manager.get_command("object_pose")[0]
+                             expect_goal("sampled goal",
+                                         torch.allclose(sampled[:EXPECTED_GOAL.numel()],
+                                                        EXPECTED_GOAL, atol=1e-3),
+                                         f"{sampled.tolist()}")
+                             # implicit-goal task — derive the goal from scene state instead
+                             peg = unw.scene["rack"].data.root_pos_w[0] + OFFSET
+                             expect_goal("peg pose", torch.allclose(peg, EXPECTED_PEG, atol=1e-3), "")
+  GOAL_OBS_TERM_NAME   — policy-group obs term carrying the goal ("" to skip the obs half of G1)
+  GOAL_OBS_DIMS        — leading dims of the goal that appear in the obs (e.g. 3 for position)
+  PREDICATE_DEFS       — module-level `def` blocks, one force function per predicate:
+                             def force_mug_on_peg(unw):
+                                 pose = torch.tensor([...], device=unw.device)
+                                 unw.scene["mug"].write_root_pose_to_sim(
+                                     pose.expand(unw.num_envs, -1).contiguous())
+                         `write_root_pose_to_sim` REJECTS a (1, 7) tensor when num_envs > 1 —
+                         always broadcast as above. Zero velocities too, or the object arrives
+                         at the pose already moving away from it.
+  PREDICATE_LIST       — the list this smoke iterates. One entry per implemented subgoal, the
+                         final success condition, and every termination term:
+                             PREDICATES = [
+                                 ("grasp subgoal",  force_grasp,      fired_term("grasped")),
+                                 ("mug on peg",     force_mug_on_peg, fired_term("success")),
+                                 ("object dropped", force_drop,       fired_term("object_dropping")),
+                                 ("time-out",       force_timeout,    fired_term("time_out")),
+                             ]
+                         `fired_term(name)` is provided below for TerminationsCfg terms. For a
+                         subgoal that is not a termination term, pass any function
+                         `unw -> bool tensor of shape (num_envs,)`.
+"""
+import argparse
+import sys
+
+# Kit's shutdown can kill the process before stdout flushes, losing the
+# `S<N> OK:` verdict line that IS this smoke's pass criterion.
+sys.stdout.reconfigure(line_buffering=True)
+from _verdict import Verdict   # noqa: E402  — sibling module, rendered alongside
+V = Verdict("S4")
+from pathlib import Path
+
+import numpy as np
+import torch
+from isaaclab.app import AppLauncher
+
+parser = argparse.ArgumentParser()
+AppLauncher.add_app_launcher_args(parser)
+args = parser.parse_args([])
+args.headless = True
+args.enable_cameras = True          # the V<i> keyframes need rgb_array capture
+sim_app = AppLauncher(args).app
+
+import gymnasium as gym  # noqa: E402
+import isaaclab_tasks    # noqa: F401, E402
+from isaaclab_tasks.utils import parse_env_cfg  # noqa: E402
+
+TASK_ID = "{{TASK_ID}}"
+NUM_ENVS = {{NUM_ENVS}}
+FRAMES_DIR = Path("{{FRAMES_DIR}}")
+
+cfg = parse_env_cfg(TASK_ID, device="cuda:0", num_envs=NUM_ENVS, use_fabric=True)
+
+# Pin goal sampler to a known value
+{{GOAL_OVERRIDES_BLOCK}}
+
+# Camera — THE SHARED HARBOR FRAMING, identical to render.py and the other render smokes.
+# Do not invent a per-task angle: these keyframes are compared against §3's reset frames and
+# §6's rollout frames, and that only means something from the same viewpoint.
+cfg.viewer.origin_type = "env"
+cfg.viewer.env_index = 0
+cfg.viewer.eye = (2.5, 2.5, 1.6)
+cfg.viewer.lookat = (0.30, 0.0, 0.4)
+
+env = gym.make(TASK_ID, cfg=cfg, render_mode="rgb_array")
+unw = env.unwrapped
+obs, _ = env.reset(seed=0)
+zero = torch.zeros((unw.num_envs, env.action_space.shape[-1]), device=unw.device)
+FRAMES_DIR.mkdir(parents=True, exist_ok=True)
+
+try:
+    import imageio.v2 as imageio
+except ImportError:
+    import imageio  # type: ignore[no-redef]
+
+
+# ------------------------------------------------------------------ G1  goal representation
+goal_checks = []
+
+
+def expect_goal(name, condition, detail=""):
+    goal_checks.append((name, bool(condition), detail))
+
+
+{{GOAL_CHECK_BLOCK}}
+
+GOAL_OBS_TERM = "{{GOAL_OBS_TERM_NAME}}"
+GOAL_OBS_DIMS = int("{{GOAL_OBS_DIMS}}" or 0)
+if GOAL_OBS_TERM:
+    term_order = unw.observation_manager.active_terms["policy"]
+    term_dims = unw.observation_manager.group_obs_term_dim["policy"]
+    idx = term_order.index(GOAL_OBS_TERM)
+    offset = sum(d[0] for d in term_dims[:idx])
+    width = term_dims[idx][0]
+    goal_in_obs = obs["policy"][0, offset:offset + width][:GOAL_OBS_DIMS]
+    expect_goal(f"goal in obs slot '{GOAL_OBS_TERM}'",
+                torch.allclose(goal_in_obs, EXPECTED_GOAL[:GOAL_OBS_DIMS], atol=1e-3),
+                f"{goal_in_obs.tolist()} vs {EXPECTED_GOAL[:GOAL_OBS_DIMS].tolist()}")
+
+bad_goal = [f"{n} ({d})" if d else n for n, ok, d in goal_checks if not ok]
+V.check("G1", "goal representation", goal_checks and not bad_goal,
+        f"{len(goal_checks) - len(bad_goal)}/{len(goal_checks)} goal checks pass"
+        + (f"; FAILED: {bad_goal}" if bad_goal else "")
+        + ("; NO GOAL CHECKS WERE WRITTEN" if not goal_checks else ""))
+
+
+# ------------------------------------------------------------------ predicates
+def fired_term(term_name):
+    """`fired_fn` for a TerminationsCfg term — per-term dones for the step just taken.
+
+    The live `_term_dones` is cleared by the auto-reset for envs that terminated, so read
+    `_last_episode_dones`, which survives it.
+    """
+    def _fired(unw):
+        tm = unw.termination_manager
+        return tm._last_episode_dones[:, tm.active_terms.index(term_name)]
+    return _fired
+
+
+{{PREDICATE_DEFS}}
+
+{{PREDICATE_LIST}}
+
+for i, (label, force_fn, fired_fn) in enumerate(PREDICATES, start=1):
+    env.reset(seed=0)
+    env.step(zero)
+    before = bool(fired_fn(unw).any())
+
+    force_fn(unw)
+
+    # Capture the keyframe BEFORE env.step(). A termination that fires triggers IsaacLab's
+    # auto-reset INSIDE step(), so a frame taken afterwards shows the freshly-reset scene while
+    # claiming to show the triggering state — the V<i> check would then pass on every predicate
+    # while showing none of them. sim.render() pushes the written poses to the viewport without
+    # advancing physics, so the frame is exactly the state force_fn built.
+    unw.sim.render()
+    frame = env.render()
+
+    env.step(zero)
+    fired = fired_fn(unw)
+    after_all = bool(fired.all())
+    n_fired = int(fired.sum())
+
+    detail = f"'{label}': start={'FIRED' if before else 'clear'}, forced={n_fired}/{unw.num_envs}"
+    if before:
+        detail += " — PREDICATE IS TRUE AT THE START STATE; §6 would optimise against it"
+    elif not after_all:
+        detail += " — did not fire in every env; print the predicate's inputs at the forced " \
+                  "state before touching its thresholds"
+    V.check(f"C{i}", f"predicate fires: {label}", (not before) and after_all, detail)
+
+    ok_frame = frame is not None
+    spread = float(np.asarray(frame, dtype=np.int16).std()) if ok_frame else 0.0
+    slug = "".join(c if c.isalnum() else "_" for c in label).strip("_")
+    path = FRAMES_DIR / f"{i:02d}_{slug}.png"
+    if ok_frame:
+        imageio.imwrite(str(path), np.asarray(frame, dtype=np.uint8))
+    V.check(f"V{i}", f"keyframe: {label}", ok_frame and spread > 5.0,
+            f"{path} (pixel std {spread:.1f})" if ok_frame
+            else "no frame captured — check enable_cameras / render_mode")
+
+# V.done() BEFORE the teardown: Kit's shutdown can kill the process, and anything after
+# sim_app.close() may never run — including the `S4 OK:` line that IS the pass criterion.
+V.done(f"G1 goal + {len(PREDICATES)} predicate(s) x2 checks; keyframes in {FRAMES_DIR}. "
+       f"Agent: OPEN THEM — a predicate that fires in a state you did not mean passes C<i>.")
+env.close()
+sim_app.close()

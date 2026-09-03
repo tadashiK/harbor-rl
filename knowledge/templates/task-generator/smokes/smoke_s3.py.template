@@ -1,0 +1,188 @@
+"""S3 smoke (numeric pass) — the reset layout actually lands in the simulator.
+
+Five checks, each on its own `[Cn] PASS|FAIL` line, all of them run every invocation. This is
+the numeric half of §3; `smoke_s3_render.py` is the visual half, and neither substitutes for
+the other — numbers confirm the layout is what you asked for, frames confirm what you asked for
+is what you meant.
+
+  C1  injected values     every pinned reset value reads back out of the sim exactly
+  C2  buffers populated   every scene entity + sensor has finite, correctly-shaped data after reset
+  C3  robot configuration robot starts finite, inside its joint limits, identical in every env
+  C4  layout settles      objects rest where they were placed — no ejection, no sinking, no fall
+  C5  repeatable          the same seed produces the same start state twice running
+
+C4 is the one that catches a bad layout. An object spawned intersecting the table is legal at
+t=0 and gets ejected on the first physics step; an object spawned a millimetre above nothing
+falls. Both look perfect in a single post-reset read and ruin every episode.
+
+Substitutions:
+  TASK_ID               — gym task id
+  NUM_ENVS              — envs to build (2 for gpu-sim)
+  ROBOT_ASSET           — scene key of the robot articulation (e.g. "robot")
+  INIT_OVERRIDES_BLOCK  — lines pinning cfg.events.<term>.params ranges to point intervals,
+                          e.g. cfg.events.reset_object_position.params["pose_range"] = {...}
+  EXPECTED_STATE_CHECKS — one `expect(...)` call per injected value. Use expect(), NOT bare
+                          assert: a bare assert stops at the first failure and you learn about
+                          one wrong pose per run. Example:
+                              expect("cube pose",
+                                     torch.allclose(unw.scene["cube"].data.root_pos_w[:, :2],
+                                                    expected_xy, atol=1e-3),
+                                     f"got {unw.scene['cube'].data.root_pos_w[0, :2].tolist()}")
+  SETTLE_STEPS          — zero-action steps for C4 (default 30)
+  SETTLE_TOL            — metres an object may drift during C4 and still count as resting (0.02)
+"""
+import argparse
+import sys
+
+# Kit's shutdown can kill the process before stdout flushes, losing the
+# `S<N> OK:` verdict line that IS this smoke's pass criterion.
+sys.stdout.reconfigure(line_buffering=True)
+from _verdict import Verdict   # noqa: E402  — sibling module, rendered alongside
+V = Verdict("S3")
+import torch
+from isaaclab.app import AppLauncher
+
+parser = argparse.ArgumentParser()
+AppLauncher.add_app_launcher_args(parser)
+args = parser.parse_args([])
+args.headless = True
+args.enable_cameras = False
+sim_app = AppLauncher(args).app
+
+import gymnasium as gym  # noqa: E402
+import isaaclab_tasks    # noqa: F401, E402
+from isaaclab_tasks.utils import parse_env_cfg  # noqa: E402
+
+TASK_ID = "{{TASK_ID}}"
+NUM_ENVS = {{NUM_ENVS}}
+ROBOT_ASSET = "{{ROBOT_ASSET}}"
+SETTLE_STEPS = {{SETTLE_STEPS}}
+SETTLE_TOL = {{SETTLE_TOL}}
+
+cfg = parse_env_cfg(TASK_ID, device="cuda:0", num_envs=NUM_ENVS, use_fabric=True)
+
+# Pin reset ranges to point intervals (DR-aware-but-noop check)
+{{INIT_OVERRIDES_BLOCK}}
+
+env = gym.make(TASK_ID, cfg=cfg)
+unw = env.unwrapped
+obs, _ = env.reset(seed=0)
+
+articulations = dict(unw.scene.articulations)
+rigid_objects = dict(unw.scene.rigid_objects)
+sensors = dict(getattr(unw.scene, "sensors", {}))
+
+# ------------------------------------------------------------------ C1  injected values
+checks = []
+
+
+def expect(name, condition, detail=""):
+    """Record one injected-value check. Every one runs — see the docstring on bare asserts."""
+    checks.append((name, bool(condition), detail))
+
+
+{{EXPECTED_STATE_CHECKS}}
+
+failed = [f"{n} ({d})" if d else n for n, ok, d in checks if not ok]
+V.check("C1", "injected values", checks and not failed,
+        f"{len(checks) - len(failed)}/{len(checks)} injected values match"
+        + (f"; MISMATCH: {failed}" if failed else "")
+        + ("; NO CHECKS WERE WRITTEN — the reset layout is unverified" if not checks else ""))
+
+# ------------------------------------------------------------------ C2  buffers populated
+buf_problems = []
+for name, ent in {**articulations, **rigid_objects}.items():
+    fields = ["root_state_w"] + (["joint_pos", "joint_vel"] if name in articulations else [])
+    for field in fields:
+        tensor = getattr(ent.data, field, None)
+        if tensor is None:
+            buf_problems.append(f"{name}.{field} is absent")
+        elif tensor.shape[0] != unw.num_envs:
+            buf_problems.append(f"{name}.{field} has {tensor.shape[0]} rows, expected "
+                                f"{unw.num_envs}")
+        elif not torch.isfinite(tensor).all():
+            buf_problems.append(f"{name}.{field} is non-finite")
+for name, sensor in sensors.items():
+    if getattr(sensor, "data", None) is None:
+        buf_problems.append(f"sensor {name} has no data after reset")
+V.check("C2", "buffers populated", not buf_problems,
+        f"{len(articulations)} articulation(s), {len(rigid_objects)} rigid object(s), "
+        f"{len(sensors)} sensor(s)" + (f"; {buf_problems}" if buf_problems else ""))
+
+# ------------------------------------------------------------------ C3  robot configuration
+robot = unw.scene[ROBOT_ASSET]
+jpos = robot.data.joint_pos
+limits = getattr(robot.data, "joint_pos_limits", None)
+if limits is None:
+    limits = getattr(robot.data, "soft_joint_pos_limits", None)
+
+robot_problems = []
+if not torch.isfinite(jpos).all():
+    robot_problems.append("non-finite joint positions at reset")
+if limits is not None:
+    below = (jpos < limits[..., 0]).any(dim=0)
+    above = (jpos > limits[..., 1]).any(dim=0)
+    out = [robot.joint_names[j] for j in range(jpos.shape[1]) if bool(below[j] or above[j])]
+    if out:
+        robot_problems.append(f"init pose is OUTSIDE the joint limits for {out} — the "
+                              f"articulation is fighting its own stops from step 0")
+# Point-interval ranges make every env identical; a difference means a partial reset.
+if unw.num_envs > 1:
+    spread = float((jpos - jpos[0:1]).abs().max())
+    if spread > 1e-4:
+        robot_problems.append(f"envs do not agree on the start pose (max spread {spread:.5f}) "
+                              f"— a reset term is not covering every env")
+V.check("C3", "robot configuration", not robot_problems,
+        f"{ROBOT_ASSET}: {jpos.shape[1]} joints, "
+        f"range [{float(jpos.min()):+.3f}, {float(jpos.max()):+.3f}]"
+        + (f"; {robot_problems}" if robot_problems else ""))
+
+# ------------------------------------------------------------------ C4  layout settles
+before = {name: ent.data.root_pos_w.clone() for name, ent in rigid_objects.items()}
+zero = torch.zeros((unw.num_envs, env.action_space.shape[-1]), device=unw.device)
+for _ in range(SETTLE_STEPS):
+    env.step(zero)
+
+settle_problems = []
+for name, ent in rigid_objects.items():
+    drift = float((ent.data.root_pos_w - before[name]).norm(dim=-1).max())
+    z = float(ent.data.root_pos_w[:, 2].min())
+    if drift > SETTLE_TOL:
+        settle_problems.append(f"{name} moved {drift:.4f} m while nothing acted on it — "
+                               f"spawned intersecting geometry (ejected) or unsupported (fell)")
+    if z < -1.0:
+        settle_problems.append(f"{name} fell to z={z:.2f}")
+V.check("C4", "layout settles", not settle_problems,
+        f"{len(rigid_objects)} object(s) held within {SETTLE_TOL} m over {SETTLE_STEPS} steps"
+        + (f"; {settle_problems}" if settle_problems else ""))
+
+# ------------------------------------------------------------------ C5  repeatable
+def snapshot():
+    env.reset(seed=0)
+    return {name: ent.data.root_state_w.clone()
+            for name, ent in {**articulations, **rigid_objects}.items()}
+
+
+# Both snapshots come AFTER the C4 stepping, so any difference between them is state carried
+# across the reset boundary rather than a difference in how far the episode ran.
+snap_a, snap_b = snapshot(), snapshot()
+repeat_problems = []
+for name in snap_a:
+    if not torch.isfinite(snap_b[name]).all():
+        repeat_problems.append(f"{name} non-finite after re-reset")
+        continue
+    delta = float((snap_b[name] - snap_a[name]).abs().max())
+    if delta > 1e-4:
+        repeat_problems.append(f"{name} differs by {delta:.5f} between two identical resets — "
+                               f"state is leaking across episodes")
+V.check("C5", "repeatable", not repeat_problems,
+        f"two seed=0 resets agree across {len(snap_a)} entities"
+        + (f"; {repeat_problems}" if repeat_problems else ""))
+
+# ------------------------------------------------------------------ verdict
+# V.done() BEFORE the teardown: Kit's shutdown can kill the process, and anything after
+# sim_app.close() may never run — including the `S3 OK:` line that IS the pass criterion.
+V.done("C1 injected values · C2 buffers · C3 robot configuration · C4 layout settles · "
+       "C5 repeatable")
+env.close()
+sim_app.close()

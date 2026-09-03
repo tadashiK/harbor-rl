@@ -1,0 +1,38 @@
+"""Cfg for EMACumulativeRelativeJointPositionAction.
+
+Rendered alongside `ema_delta_joint_pos.py`. Drop into the new task's
+`mdp/actions_cfg.py`. Inherits `JointPositionActionCfg`, so all of
+`asset_name`, `joint_names`, `scale`, `offset`, `use_default_offset`
+work the same way.
+
+Extras:
+    alpha               EMA weight on the new applied target.
+                        - float in [0, 1]; 1.0 = no smoothing (apply current target as-is)
+                        - dict {regex: weight} for per-joint weights
+    joint_lower_limit   Optional list[float], action_dim long. Clamps the post-EMA
+    joint_upper_limit   target. Both must be set together; otherwise no clamp.
+"""
+from dataclasses import MISSING
+
+from isaaclab.envs.mdp.actions import JointPositionActionCfg
+from isaaclab.managers.action_manager import ActionTerm
+from isaaclab.utils import configclass
+
+from .actions import EMACumulativeRelativeJointPositionAction
+
+
+@configclass
+class EMACumulativeRelativeJointPositionActionCfg(JointPositionActionCfg):
+    class_type: type[ActionTerm] = EMACumulativeRelativeJointPositionAction
+
+    scale: float | dict[str, float] = 0.2
+    """Action scale (rad per unit policy output). Default 0.2 (plugin convention)
+    overrides the `JointPositionActionCfg` parent default of 1.0."""
+
+    alpha: float | dict[str, float] = 0.5
+    """EMA weight in [0, 1]. Default 0.5 (plugin convention — half-and-half blend
+    against the previously-applied target). 1.0 disables smoothing."""
+
+    joint_lower_limit: list[float] | None = None
+    joint_upper_limit: list[float] | None = None
+    """Optional per-joint clamp on the post-EMA target."""

@@ -1,0 +1,8 @@
+# Adds a link to the "New issue" chooser. This is the one placement that redirects
+# traffic rather than advertising: a question that would otherwise arrive as an issue
+# gets offered the right venue at the moment it is being filed.
+blank_issues_enabled: true
+contact_links:
+  - name: Discussion & questions
+    url: https://discord.gg/W3ywA3jUKs
+    about: Ask about setup, a simulator that is not cooperating, or how to shape a task.

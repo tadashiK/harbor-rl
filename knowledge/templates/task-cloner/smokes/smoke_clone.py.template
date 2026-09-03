@@ -1,0 +1,55 @@
+"""Clone smoke — the cloned task builds, rolls out with finite reward, and
+(soft) inherits per-term reward logging. Rendered by task-cloner.
+
+Covers the sim-requiring clone checks in one AppLauncher:
+  SC1 build     — gym.make(<dest>) succeeds
+  SC4 rollout   — a few steps run; reward is finite every step
+  SC3 per-term  — info["detailed_reward"] present (WARNING only if absent;
+                  reward-tune wires it via /harbor:reward-add-log before the loop)
+
+Independence (SC2) and teardown (SC5) are static / op=delete checks, not run here.
+
+Substitutions:
+  {{DEST_ID}}  — cloned gym task id
+  {{NUM_ENVS}} — 2 for gpu-sim benchmarks, else 1
+"""
+import argparse
+import numpy as np
+from isaaclab.app import AppLauncher
+
+parser = argparse.ArgumentParser()
+AppLauncher.add_app_launcher_args(parser)
+args = parser.parse_args([])
+args.headless = True
+args.enable_cameras = False
+sim_app = AppLauncher(args).app
+
+import gymnasium as gym  # noqa: E402
+import isaaclab_tasks    # noqa: F401, E402  — registers all tasks (incl. the clone)
+from isaaclab_tasks.utils import parse_env_cfg  # noqa: E402
+
+
+def _to_np(t):
+    return t.detach().cpu().numpy() if hasattr(t, "detach") else np.asarray(t)
+
+
+cfg = parse_env_cfg("{{DEST_ID}}", device="cuda:0", num_envs={{NUM_ENVS}}, use_fabric=True)
+env = gym.make("{{DEST_ID}}", cfg=cfg)
+obs, info = env.reset(seed=0)
+
+all_finite = True
+saw_detailed = False
+for _ in range(10):
+    a = env.action_space.sample()
+    obs, r, term, trunc, info = env.step(a)
+    if not np.all(np.isfinite(_to_np(r).reshape(-1))):
+        all_finite = False
+    if info.get("detailed_reward") is not None:
+        saw_detailed = True
+
+assert all_finite, "NaN/Inf in reward — clone build or import rewire is broken"
+
+per_term = "yes" if saw_detailed else "no (per-term logging not wired — reward-tune will add it)"
+print(f"CLONE OK: {{DEST_ID}} builds + rolls out, reward finite, per_term_logging={per_term}")
+env.close()
+sim_app.close()

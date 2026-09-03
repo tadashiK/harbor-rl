@@ -1,0 +1,136 @@
+"""S2 smoke — action controller maps a known random action to the expected target.
+
+Substitutions:
+  TASK_ID            — gym task id
+  ACTION_TERM_NAME   — the primary action-term name (from active_terms)
+  ACTION_MODE        — one of:
+        abs_joint_default_offset | abs_joint_no_offset | delta_joint
+        abs_ee_pose | delta_ee_pose
+        binary_gripper | joint_effort | non_holonomic
+        ema_delta_joint_pos     # EMACumulativeRelativeJointPositionAction (custom)
+        ema_delta_ee_pose       # EMACumulativeDeltaPoseAction (custom; position-only check)
+"""
+import argparse
+import sys
+
+# Kit's shutdown can kill the process before stdout flushes, losing the
+# `S<N> OK:` verdict line that IS this smoke's pass criterion.
+sys.stdout.reconfigure(line_buffering=True)
+from _verdict import Verdict   # noqa: E402  — sibling module, rendered alongside
+V = Verdict("S2")
+import torch
+from isaaclab.app import AppLauncher
+
+parser = argparse.ArgumentParser()
+AppLauncher.add_app_launcher_args(parser)
+args = parser.parse_args([])
+args.headless = True
+args.enable_cameras = False
+sim_app = AppLauncher(args).app
+
+import gymnasium as gym  # noqa: E402
+import isaaclab_tasks    # noqa: F401, E402
+from isaaclab_tasks.utils import parse_env_cfg  # noqa: E402
+
+TASK_ID   = "{{TASK_ID}}"
+TERM_NAME = "{{ACTION_TERM_NAME}}"
+MODE      = "{{ACTION_MODE}}"
+
+cfg = parse_env_cfg(TASK_ID, device="cuda:0", num_envs={{NUM_ENVS}}, use_fabric=True)
+env = gym.make(TASK_ID, cfg=cfg)
+unw = env.unwrapped
+obs, _ = env.reset(seed=0)
+
+term  = unw.action_manager._terms[TERM_NAME]
+_raw_scale = getattr(term.cfg, "scale", 1.0)
+# The ema_* action terms carry a per-axis TUPLE scale; float() on it raises TypeError.
+scale = float(_raw_scale) if isinstance(_raw_scale, (int, float)) else _raw_scale
+
+# Capture pre-step state needed by some modes
+joint_ids = getattr(term, "_joint_ids", slice(None))
+robot     = unw.scene["robot"]
+initial_joint = robot.data.joint_pos[:, joint_ids].clone()
+default_joint = robot.data.default_joint_pos[:, joint_ids].clone()
+body_id = getattr(term, "_body_idx", None)
+initial_ee = robot.data.body_pose_w[:, body_id].clone() if body_id is not None else None
+
+# Drive a known action: 0.2 across all dims
+known_action = 0.2 * torch.ones((unw.num_envs, env.action_space.shape[-1]), device=unw.device)
+env.step(known_action)
+
+actual_target = term.processed_actions
+a_slice       = known_action[:, : term.action_dim]
+
+if MODE == "abs_joint_default_offset":
+    expected = a_slice * scale + default_joint
+elif MODE == "abs_joint_no_offset":
+    expected = a_slice * scale
+elif MODE == "delta_joint":
+    expected = initial_joint + a_slice * scale
+elif MODE == "abs_ee_pose":
+    # processed_actions for absolute DiffIK is the pose in body frame the user provided, scaled
+    expected = a_slice * scale
+elif MODE == "delta_ee_pose":
+    # SE(3) compose(initial_ee, a_slice * scale) — see DifferentialIKAction.process_actions
+    # For the smoke we accept a position-only equality (orientation hard to assert without quat tools)
+    expected_pos = initial_ee[..., :3] + a_slice[..., :3] * scale
+    actual_pos   = actual_target[..., :3]
+    assert torch.allclose(actual_pos, expected_pos, atol=1e-3), \
+        f"delta_ee_pose target.pos mismatch:\n  actual={actual_pos}\n  expected={expected_pos}"
+    V.done(f"mode={MODE} action 0.2 → EE pos delta ≈ {(actual_pos - initial_ee[..., :3]).norm(dim=-1).mean():.4f}")
+    env.close(); sim_app.close()
+    raise SystemExit(0)
+elif MODE == "binary_gripper":
+    # processed_actions selects open/close based on sign — assert it picked one of them
+    open_expr  = torch.tensor(term.cfg.open_command_expr, device=unw.device)
+    close_expr = torch.tensor(term.cfg.close_command_expr, device=unw.device)
+    assert (torch.allclose(actual_target, open_expr.expand_as(actual_target)) or
+            torch.allclose(actual_target, close_expr.expand_as(actual_target))), \
+        f"binary_gripper target {actual_target} matches neither open ({open_expr}) nor close ({close_expr})"
+    V.done(f"mode={MODE} action 0.2 → gripper picks open/close target as expected")
+    env.close(); sim_app.close()
+    raise SystemExit(0)
+elif MODE == "joint_effort":
+    expected = a_slice * scale
+elif MODE == "non_holonomic":
+    expected = a_slice * scale
+elif MODE == "ema_delta_joint_pos":
+    # EMACumulativeRelativeJointPositionAction at t=0 (post-reset, prev=q_init, delta_{-1}=0):
+    #   target_0 = q_init + alpha * (scale * a_0 + offset)        before clamp
+    # The EMA class reads `_alpha`, `_offset` from JointPositionAction and `init_joint_pos`,
+    # `joint_lower_limit`, `joint_upper_limit` from itself.
+    alpha = float(term._alpha) if isinstance(term._alpha, float) else term._alpha
+    offset = term._offset if hasattr(term, "_offset") else 0.0
+    q_init = term.init_joint_pos.clone()
+    base   = q_init + alpha * (a_slice * scale + offset)
+    if term.joint_lower_limit is not None and term.joint_upper_limit is not None:
+        expected = torch.clamp(base, term.joint_lower_limit, term.joint_upper_limit)
+    else:
+        expected = base
+elif MODE == "ema_delta_ee_pose":
+    # EMACumulativeDeltaPoseAction at t=0 (post-reset, prev=q_init pose, delta_{-1}=0):
+    #   target_0.pos  = q_init.pos + alpha * scale[:3] * a_0[:3]   (before clamp)
+    #   target_0.quat = re-norm( q_init.quat ⊗ aaq(alpha * scale[3:6] * a_0[3:6]) ⊗ ... )
+    # We position-only-check (consistent with delta_ee_pose smoke). processed_actions is
+    # 7-D (pos + quat); take the first 3 dims.
+    alpha = float(term._alpha) if isinstance(term._alpha, float) else term._alpha
+    s_pos = term._scale[:, :3]
+    a_pos = a_slice[:, :3] if a_slice.shape[-1] >= 3 else a_slice
+    expected_pos = term.init_ee_pos + alpha * s_pos * a_pos
+    if term.pos_lower_limit is not None and term.pos_upper_limit is not None:
+        expected_pos = torch.clamp(expected_pos, term.pos_lower_limit, term.pos_upper_limit)
+    actual_pos = actual_target[:, :3]
+    assert torch.allclose(actual_pos, expected_pos, atol=1e-4), \
+        f"ema_delta_ee_pose target.pos mismatch:\n  actual={actual_pos}\n  expected={expected_pos}"
+    delta_norm = (actual_pos - term.init_ee_pos).norm(dim=-1).mean()
+    V.done(f"mode={MODE} action 0.2 → EE pos delta ≈ {delta_norm:.4f} as expected")
+    env.close(); sim_app.close()
+    raise SystemExit(0)
+else:
+    raise ValueError(f"unknown ACTION_MODE: {MODE}")
+
+assert torch.allclose(actual_target, expected, atol=1e-4), \
+    f"action target mismatch (mode={MODE}):\n  actual={actual_target}\n  expected={expected}"
+V.done(f"mode={MODE} action 0.2 → target ≈ {actual_target.mean():.4f} as expected")
+env.close()
+sim_app.close()

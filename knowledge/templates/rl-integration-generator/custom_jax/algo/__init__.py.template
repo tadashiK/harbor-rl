@@ -1,0 +1,11 @@
+# Ports the algorithmic recipe of LocoMuJoCo
+# (https://github.com/robfiras/loco-mujoco)
+# Copyright (c) 2024 Al-Hafez. Licensed under the MIT License.
+# Full retained notice: THIRD_PARTY_NOTICES.md in the HARBOR repository.
+"""Algo registry — class name → file path."""
+from pathlib import Path
+
+from utils.common import list_class_names
+
+cur_path = Path(__file__).resolve().parent
+alg_name_to_path = list_class_names(cur_path)

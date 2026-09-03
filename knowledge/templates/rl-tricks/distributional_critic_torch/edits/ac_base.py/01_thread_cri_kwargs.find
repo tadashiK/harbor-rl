@@ -1,0 +1,2 @@
+        self.actor = act_cls(self.obs_dim, self.action_dim).to(self.device)
+        self.critic = cri_cls(self.obs_dim, self.action_dim).to(self.device)

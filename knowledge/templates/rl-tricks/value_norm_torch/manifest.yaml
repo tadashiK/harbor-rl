@@ -1,0 +1,25 @@
+name: value_norm_torch
+description: |
+  PopArt-flavored running-mean/std normalization of the value head for PPO
+  on the custom_torch tree. The default custom_torch ppo.py only partially
+  wires `self.value_rms` (creates it + unnormalizes inside get_actions but
+  forgets to unnormalize the bootstrap `next_value` and to renormalize
+  `returns`/`values` before update_net). This trick fixes both gaps so the
+  critic trains against normalized targets.
+
+  Reference: the built-in custom_torch PPO — `compute_adv` lines that
+  `self.value_rms.update(next_value)` + `next_value = self.value_rms.unnormalize(next_value)`,
+  then later `b_returns = self.value_rms.normalize(returns)` + `b_values = self.value_rms.normalize(values)`.
+
+algorithms: [ppo]
+backend: custom_torch
+
+references:
+  - custom_torch PPO            # canonical compute_adv pattern
+  - knowledge/templates/rl-integration-generator/custom_torch/algo/ppo.py.template  # the file we patch (rendered copy under <repo>/harbor/...)
+
+caveats:
+  - "Only PPO (the on-policy GAE bootstrap is what value_norm targets). SAC/TD3 use target critics, not value_rms."
+  - "Stacks cleanly with obs_rms_torch and value_clip_torch; the three are designed to be orthogonal patches on `_compute_adv` / `update_net`."
+
+patches: patches.yaml

@@ -1,0 +1,8 @@
+        self.actor = act_cls(self.obs_dim, self.action_dim).to(self.device)
+        import inspect
+        cri_sig = inspect.signature(cri_cls.__init__).parameters
+        cri_kwargs = {}
+        for _k in ("v_min", "v_max", "num_atoms"):
+            if _k in self.cfg and _k in cri_sig:
+                cri_kwargs[_k] = self.cfg.get(_k)
+        self.critic = cri_cls(self.obs_dim, self.action_dim, **cri_kwargs).to(self.device)

@@ -1,0 +1,96 @@
+"""S2.5 smoke — the actuator actually TRACKS its commanded target (physics-param sanity).
+
+Runs AFTER S2 confirms the action maps to the expected control target. S2 checks the
+*commanded* target; S2.5 checks the *achieved* state: hold a fixed reachable action long
+enough for the PD/actuator to settle, then compare the robot's achieved joint positions
+against the commanded `joint_pos_target`. A large steady-state error almost always means the
+robot's physics params are improper — actuator `stiffness` / `damping` / `effort_limit`
+(implicit actuators) or the explicit-actuator `kp` / `kd`. Fix by mirroring the benchmark's
+own built-in robot ActuatorCfg (e.g. the canonical robot cfg the example task uses) until the
+error is small, then re-run.
+
+MANDATORY, and it runs every time S2 passes — all three modes §2's analysis recommends are
+position control, so there is always a target to track. Iterate on the PARAMETERS until it
+passes. Raising TRACKING_TOL to clear the assert is not a fix: it ships a robot that cannot
+hold the pose the policy will command on every step of every episode, and the cost surfaces in
+§6 as a reward that will not converge.
+
+Substitutions:
+  TASK_ID            — gym task id
+  ROBOT_ASSET        — scene key of the robot articulation (e.g. "robot" / "robot_0")
+  ACTION_TERM_NAME   — the primary action-term name (from active_terms)
+  NUM_ENVS           — 2 for gpu-sim benchmarks, else 1
+  SETTLE_STEPS       — control steps to hold the action so the PD settles (default 150)
+  TRACKING_TOL       — max per-joint |achieved - target| allowed at steady state
+                            (joint-space: ~0.05 rad; tighten/loosen per the robot)
+  HOLD_ACTION_EXPR   — a torch tensor (NUM_ENVS, action_dim) giving a REACHABLE static
+                            target. Default `torch.zeros(...)` holds the home/default pose
+                            (hardest gravity hold). For abs_ee_pose / abs_joint_no_offset set a
+                            reachable target instead of zeros.
+"""
+import argparse
+import sys
+
+# Kit's shutdown can kill the process before stdout flushes, losing the
+# `S<N> OK:` verdict line that IS this smoke's pass criterion.
+sys.stdout.reconfigure(line_buffering=True)
+from _verdict import Verdict   # noqa: E402  — sibling module, rendered alongside
+V = Verdict("S2.5")
+import torch
+from isaaclab.app import AppLauncher
+
+parser = argparse.ArgumentParser()
+AppLauncher.add_app_launcher_args(parser)
+args = parser.parse_args([])
+args.headless = True
+args.enable_cameras = False
+sim_app = AppLauncher(args).app
+
+import gymnasium as gym  # noqa: E402
+import isaaclab_tasks    # noqa: F401, E402
+from isaaclab_tasks.utils import parse_env_cfg  # noqa: E402
+
+TASK_ID      = "{{TASK_ID}}"
+ROBOT_ASSET  = "{{ROBOT_ASSET}}"
+TERM_NAME    = "{{ACTION_TERM_NAME}}"
+NUM_ENVS     = {{NUM_ENVS}}
+SETTLE_STEPS = {{SETTLE_STEPS}}
+TRACKING_TOL = {{TRACKING_TOL}}
+
+cfg = parse_env_cfg(TASK_ID, device="cuda:0", num_envs=NUM_ENVS, use_fabric=True)
+env = gym.make(TASK_ID, cfg=cfg)
+unw = env.unwrapped
+obs, _ = env.reset(seed=0)
+
+robot     = unw.scene[ROBOT_ASSET]
+term      = unw.action_manager._terms[TERM_NAME]
+joint_ids = getattr(term, "_joint_ids", slice(None))
+action_dim = env.action_space.shape[-1]
+
+# Hold a fixed, reachable action so the controller's target stabilizes, then let the PD settle.
+hold_action = {{HOLD_ACTION_EXPR}}
+for _ in range(SETTLE_STEPS):
+    env.step(hold_action)
+
+# Achieved vs commanded, on the joints this action term drives.
+target   = robot.data.joint_pos_target[:, joint_ids]   # what the actuators were told to reach
+achieved = robot.data.joint_pos[:, joint_ids]          # what the robot actually reached
+err      = (achieved - target).abs()
+max_err  = float(err.max())
+mean_err = float(err.mean())
+
+assert torch.isfinite(achieved).all(), "S2.5 FAIL: non-finite joint positions — sim unstable"
+assert max_err < TRACKING_TOL, (
+    f"S2.5 FAIL: actuator does not track its target.\n"
+    f"  max |achieved - target| = {max_err:.4f} (tol {TRACKING_TOL})\n"
+    f"  mean = {mean_err:.4f}\n"
+    f"  Worst joint(s): {torch.where(err[0] > TRACKING_TOL)[0].tolist()}\n"
+    f"  -> robot physics params are likely improper. Raise the actuator stiffness/damping "
+    f"(implicit) or kp/kd (explicit) in the robot's ActuatorCfg to match the benchmark's "
+    f"built-in example for this robot, then re-run S2.5."
+)
+
+V.done(f"held {SETTLE_STEPS} steps, actuator tracks target "
+      f"(max err {max_err:.4f} rad, mean {mean_err:.4f} rad < tol {TRACKING_TOL}) across {NUM_ENVS} envs")
+env.close()
+sim_app.close()

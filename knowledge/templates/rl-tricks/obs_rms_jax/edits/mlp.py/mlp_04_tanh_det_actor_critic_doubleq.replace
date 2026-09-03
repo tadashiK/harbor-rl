@@ -1,0 +1,39 @@
+# Critics
+# -----------------------------------------------------------------------------
+class MLPCritic(nn.Module):
+    """PPO critic — single scalar value head.
+
+    When `use_obs_rms=True` (default), an in-network `RunningMeanStd` layer
+    normalizes inputs. Maintained INDEPENDENTLY from the actor's RMS so the
+    critic's stats track the obs distribution it has actually seen (in PPO
+    that's the same as the actor's, but the design generalizes).
+    """
+    hidden_dims: Sequence[int] = (256, 256)
+    activation: str = "tanh"
+    use_obs_rms: bool = False
+
+    @nn.compact
+    def __call__(self, x):
+        if self.use_obs_rms:
+            x = RunningMeanStd()(x)
+        v = MLP(self.hidden_dims, 1, self.activation, output_init_scale=1.0)(x)
+        return jnp.squeeze(v, axis=-1)
+
+
+class DoubleQ(nn.Module):
+    """Twin Q networks (SAC / TD3). Concatenates obs + action then runs two MLPs.
+
+    `use_obs_rms=True` normalizes ONLY the obs (not the action — actions are
+    already in [-1, 1] from tanh-squashed policies).
+    """
+    hidden_dims: Sequence[int] = (256, 256)
+    activation: str = "relu"
+    use_obs_rms: bool = False
+
+    @nn.compact
+    def __call__(self, obs, action):
+        if self.use_obs_rms:
+            obs = RunningMeanStd()(obs)
+        x = jnp.concatenate([obs, action], axis=-1)
+        q1 = MLP(self.hidden_dims, 1, self.activation, output_init_scale=1.0,
+                 name="q1")(x)

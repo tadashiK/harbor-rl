@@ -1,0 +1,43 @@
+name: tests
+
+# L1 (contract) + L2 (unit) only — both are plain pytest with no GPU, no network,
+# and no Claude runtime. L3 is the agentic e2e pipeline (/harbor:test layers=3);
+# it needs a GPU benchmark host and is run manually, not here.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # PR runs supersede each other — cancelling the stale one is free. Pushes to main must
+  # NOT: a cancelled job reports `failure`, so a second push landing while the first is
+  # still testing marks the first commit broken forever, on a commit nobody ever tested.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: tests/requirements-test.txt
+
+      - name: Install test deps
+        run: pip install -r tests/requirements-test.txt
+
+      - name: Contract (L1) + unit (L2)
+        run: pytest tests/contract tests/unit -q

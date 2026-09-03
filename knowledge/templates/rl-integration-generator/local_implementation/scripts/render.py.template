@@ -1,0 +1,28 @@
+"""
+{{PROJECT_NAME}} — render shim for local implementation `{{LOCAL_IMPL_SLUG}}`.
+
+Thin pass-through: delegates to `python -m {{LOCAL_IMPL_SLUG}}.render` with all CLI
+args forwarded. Edit the module path below if your package uses a different entry name.
+
+Always single-env (n_envs=1), rendering enabled. Uses env_wrapper.create_render_env().
+
+Example:
+    python harbor/scripts/rl/{{LOCAL_IMPL_SLUG}}/render.py algo=ppo task={{DEFAULT_TASK}} \\
+        checkpoint=harbor/outputs/<trial_id>/checkpoint.zip
+"""
+from __future__ import annotations
+
+import subprocess
+import sys
+
+ENTRY_MODULE = "{{LOCAL_IMPL_SLUG}}.render"   # edit if your package uses a different entry
+
+
+def main():
+    cmd = [sys.executable, "-m", ENTRY_MODULE, *sys.argv[1:]]
+    print(f"[shim] $ {' '.join(cmd)}", flush=True)
+    sys.exit(subprocess.call(cmd))
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,43 @@
+    def _update_critic(self, obs, action, reward, next_obs, done):
+        gamma = float(self.cfg.algo.get("gamma", 0.99))
+        nstep = int(self.cfg.algo.get("nstep", 1))
+        if bool(self.cfg.algo.get("distributional_critic", False)):
+            return self._update_critic_c51(obs, action, reward, next_obs, done, gamma, nstep)
+        with torch.no_grad():
+            policy_noise = float(self.cfg.algo.get("policy_noise", 0.2))
+            noise_clip = float(self.cfg.algo.get("noise_clip", 0.5))
+            noise = (torch.randn_like(action) * policy_noise).clamp(-noise_clip, noise_clip)
+            next_action = (self.actor_target(next_obs) + noise).clamp(-1.0, 1.0)
+            target_Q = self.critic_target.get_q_min(next_obs, next_action)
+            target_Q = reward + (1 - done) * (gamma ** nstep) * target_Q
+        q1, q2 = self.critic.get_q1_q2(obs, action)
+        critic_loss = F.mse_loss(q1, target_Q) + F.mse_loss(q2, target_Q)
+        self.optimizer_update(self.critic_optimizer, critic_loss)
+        with torch.no_grad():
+            q_mean = float(torch.min(q1, q2).mean().item())
+        return critic_loss.item(), q_mean
+
+    def _update_critic_c51(self, obs, action, reward, next_obs, done, gamma, nstep):
+        from utils.torch_util import projection
+        with torch.no_grad():
+            policy_noise = float(self.cfg.algo.get("policy_noise", 0.2))
+            noise_clip = float(self.cfg.algo.get("noise_clip", 0.5))
+            noise = (torch.randn_like(action) * policy_noise).clamp(-noise_clip, noise_clip)
+            next_action = (self.actor_target(next_obs) + noise).clamp(-1.0, 1.0)
+            target_d1, target_d2 = self.critic_target.get_q1_q2_dist(next_obs, next_action)
+            z = self.critic.z_atoms
+            target_q1_v = (target_d1 * z).sum(dim=1, keepdim=True)
+            target_q2_v = (target_d2 * z).sum(dim=1, keepdim=True)
+            target_dist = torch.where(target_q1_v <= target_q2_v, target_d1, target_d2)
+            target_dist = projection(
+                next_dist=target_dist, reward=reward, done=done,
+                gamma=gamma ** nstep,
+                v_min=self.critic.v_min, v_max=self.critic.v_max,
+                num_atoms=self.critic.num_atoms, support=z, device=self.device,
+            )
+        d1, d2 = self.critic.get_q1_q2_dist(obs, action)
+        critic_loss = F.binary_cross_entropy(d1, target_dist) + F.binary_cross_entropy(d2, target_dist)
+        self.optimizer_update(self.critic_optimizer, critic_loss)
+        with torch.no_grad():
+            q_mean = float(torch.min((d1 * z).sum(dim=1), (d2 * z).sum(dim=1)).mean().item())
+        return critic_loss.item(), q_mean

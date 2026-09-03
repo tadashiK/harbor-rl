@@ -1,0 +1,14 @@
+    def update_critic(self, obs, action, reward, next_obs, done):
+        with torch.no_grad():
+            next_actions, _, log_prob = self.actor.get_actions_logprob(next_obs)
+            target_Q = self.critic_target.get_q_min(next_obs, next_actions) - self.get_alpha() * log_prob
+            gamma = float(self.cfg.algo.get("gamma", 0.99))
+            nstep = int(self.cfg.algo.get("nstep", 1))
+            target_Q = reward + (1 - done) * (gamma ** nstep) * target_Q
+        q1, q2 = self.critic.get_q1_q2(obs, action)
+        critic_loss = F.mse_loss(q1, target_Q) + F.mse_loss(q2, target_Q)
+        gn = self.optimizer_update(self.critic_optimizer, critic_loss)
+        # Diagnostics: mean of min(Q1, Q2) on the sampled batch.
+        with torch.no_grad():
+            q_mean = float(torch.min(q1, q2).mean().item())
+        return critic_loss.item(), gn, q_mean

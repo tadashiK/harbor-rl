@@ -1,0 +1,45 @@
+"""
+{{PROJECT_NAME}} — env factory for local-implementation `{{LOCAL_IMPL_SLUG}}`.
+
+This file is a thin shim. The real env construction is delegated to your
+package — typically `{{LOCAL_IMPL_SLUG}}.env` or whatever module your training
+code uses internally. Edit the bodies below if your package's API differs.
+
+Exposes:
+    create_env(cfg)         — vec/parallel env for train.py + eval.py (headless)
+    create_render_env(cfg)  — single env with rendering enabled for render.py
+"""
+from __future__ import annotations
+
+
+def create_env(cfg):
+    """Headless vec/parallel env for train + eval.
+
+    Default behavior: tries to import `{{LOCAL_IMPL_SLUG}}.env.create_env(cfg)` and
+    delegate. Edit if your package uses a different entry point.
+    """
+    try:
+        from {{LOCAL_IMPL_SLUG}}.env import create_env as _impl_create_env
+        return _impl_create_env(cfg)
+    except (ImportError, AttributeError) as e:
+        raise NotImplementedError(
+            f"Edit harbor/scripts/rl/{{LOCAL_IMPL_SLUG}}/env_wrapper.py to point at your package's "
+            f"env factory. Tried `{{LOCAL_IMPL_SLUG}}.env.create_env(cfg)` and got: {e}"
+        )
+
+
+def create_render_env(cfg):
+    """Single env with rendering enabled for render.py.
+
+    Default behavior: tries `{{LOCAL_IMPL_SLUG}}.env.create_render_env(cfg)`. Edit if
+    your package uses a different entry point.
+    """
+    try:
+        from {{LOCAL_IMPL_SLUG}}.env import create_render_env as _impl_create_render_env
+        return _impl_create_render_env(cfg)
+    except (ImportError, AttributeError) as e:
+        raise NotImplementedError(
+            f"Edit harbor/scripts/rl/{{LOCAL_IMPL_SLUG}}/env_wrapper.py to point at your package's "
+            f"render-env factory. Tried `{{LOCAL_IMPL_SLUG}}.env.create_render_env(cfg)` "
+            f"and got: {e}"
+        )

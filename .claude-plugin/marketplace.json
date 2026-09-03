@@ -1,0 +1,25 @@
+{
+  "name": "harbor",
+  "owner": {
+    "name": "Steven Li",
+    "url": "https://github.com/supersglzc"
+  },
+  "metadata": {
+    "description": "Marketplace for the harbor plugin (set up Python simulation repos with uv and author RL tasks end-to-end).",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "harbor",
+      "source": "./",
+      "description": "Set up Python simulation repos with uv, scaffold the RL stack (train / eval / render / sweep / tune), and author tasks end-to-end (scene → actions → reset → termination → observation → reward), with every stage gated by an executable check. Includes the dependency, benchmark, rl-integration, task and reward generator subagents and lifecycle hooks.",
+      "version": "0.2.0",
+      "author": {
+        "name": "Steven Li",
+        "url": "https://github.com/supersglzc"
+      },
+      "keywords": ["robotics", "uv", "benchmark", "rl"],
+      "category": "workflow"
+    }
+  ]
+}

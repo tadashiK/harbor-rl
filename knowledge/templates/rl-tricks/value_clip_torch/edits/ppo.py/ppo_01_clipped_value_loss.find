@@ -1,0 +1,4 @@
+                v = self.critic(
+                    self.obs_rms.normalize(obs[b]) if self.obs_rms is not None else obs[b]
+                ).flatten()
+                v_loss = 0.5 * ((v - returns[b]) ** 2).mean()

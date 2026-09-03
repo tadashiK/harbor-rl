@@ -1,0 +1,37 @@
+name: distributional_critic_torch
+description: |
+  C51-style distributional critic for off-policy TD3 / SAC (custom_torch).
+  Each Q network outputs a softmax distribution over `num_atoms` bins on a
+  fixed support [v_min, v_max]. The Bellman update is implemented via the
+  Bellemare projection (no MSE), and the critic loss is cross-entropy.
+
+  TD3 (distributional critic update):
+      target_dist = pick min-expected-value distribution between Q1, Q2
+      target_dist = projection(next_dist, reward, done, gamma^nstep, v_min, v_max, num_atoms, support)
+      loss = BCE(current_Q1, target_dist) + BCE(current_Q2, target_dist)
+
+  SAC adds the entropy term to the soft Bellman target. Since the support
+  is fixed, we fold `-α·log π(a'|s')` into the projection's reward argument:
+      shifted_reward = reward - (1-done) * gamma^nstep * α * log_prob
+      target_dist = projection(next_dist, reward=shifted_reward, ...)
+  This is mathematically equivalent to T*z = r + (1-done)·γⁿ·(z - α·log π)
+  with the support shift baked into the reward, so the projection routine
+  is unchanged.
+
+  Reference: the built-in custom_torch distributional-critic update + categorical projection.
+
+algorithms: [td3, sac]
+backend: custom_torch
+
+references:
+  - custom_torch distributional-critic update        # canonical critic update
+  - custom_torch categorical projection    # projection
+  - custom_torch DistributionalDoubleQ network          # DistributionalDoubleQ network
+
+caveats:
+  - "Actor unchanged — for both TD3 and SAC the actor loss reads get_q1 / get_q_min, which DistributionalDoubleQ implements as expected values (Σ p(z)·z). The distributional head (get_q1_q2_dist) is consumed only by the C51 critic branch."
+  - "Tune v_min / v_max to bracket the env's reasonable Q-value range — atoms outside [v_min, v_max] get clipped during projection. For ShadowHand* tasks (per-step reward ~O(1), episode 75) [-10, 10] is a sane default."
+  - "num_atoms=51 is the C51 default; raising it improves resolution at the cost of memory/throughput."
+  - "Stacks orthogonally with obs_rms_torch (touches obs flow + RunningMeanStd) and reward_norm_jax-equivalents (env-side); shares no edit regions with value_norm_torch (PPO-only)."
+
+patches: patches.yaml

@@ -1,0 +1,150 @@
+"""S6 smoke — render the task under random actions, prove the scene is STABLE, and dump
+keyframes for the agent to visually judge against the task description.
+
+Two layers of checking:
+  1. MECHANICAL (this script, asserted): obs finite every step; no scene entity explodes
+     (|root pos| bounded) or falls through the floor (root z above a floor margin); the video
+     actually shows motion (frames differ). A failure here means the scene is unstable —
+     usually penetration/interpenetration, a too-large sim dt, bad initial poses, or missing
+     collision filtering. FIX until this passes.
+  2. SEMANTIC (the agent, after this script): the agent READS the dumped keyframe PNGs and
+     judges (a) does the rollout match the task description, and (b) is there any unexpected
+     behavior — collision penetration, objects sinking into the table/robot, jitter/explosion.
+     If not, diagnose + fix (init poses, collision props, sim substeps) and re-render.
+
+The MP4 + keyframes are written next to task-history.md (the per-task workspace), NOT /tmp.
+
+Substitutions:
+  VIEWER_OVERRIDE_BLOCK     — OPTIONAL. Leave empty: the shared harbor framing is already
+                            set below. Only for a scene the shared angle cannot show.
+  TASK_ID            — gym task id
+  NUM_ENVS           — 2 for gpu-sim benchmarks, else 1 (env 0 is rendered)
+  N_STEPS            — rollout length to render (default 120)
+  N_KEYFRAMES        — evenly-spaced frames to dump as PNG (default 8)
+  OUTPUT_MP4         — abs path, e.g. <task_dir>/smoke_s6_render.mp4
+  FRAMES_DIR         — abs dir for keyframe PNGs, e.g. <task_dir>/smoke_s6_frames
+  STABILITY_CHECKS   — OPTIONAL extra per-step asserts for task-specific penetration bounds
+                            (e.g. object z stays above the table top). Leave empty for the
+                            generic checks only. Has access to `unw`, `torch`, `step_idx`.
+"""
+import argparse
+import sys
+
+# Kit's shutdown can kill the process before stdout flushes, losing the
+# `S<N> OK:` verdict line that IS this smoke's pass criterion.
+sys.stdout.reconfigure(line_buffering=True)
+from _verdict import Verdict   # noqa: E402  — sibling module, rendered alongside
+V = Verdict("S6")
+from pathlib import Path
+
+import numpy as np
+import torch
+from isaaclab.app import AppLauncher
+
+parser = argparse.ArgumentParser()
+AppLauncher.add_app_launcher_args(parser)
+args = parser.parse_args([])
+args.headless = True
+args.enable_cameras = True          # required for headless rgb_array capture
+sim_app = AppLauncher(args).app
+
+import gymnasium as gym  # noqa: E402
+import isaaclab_tasks    # noqa: F401, E402
+from isaaclab_tasks.utils import parse_env_cfg  # noqa: E402
+
+TASK_ID      = "{{TASK_ID}}"
+NUM_ENVS     = {{NUM_ENVS}}
+N_STEPS      = {{N_STEPS}}
+N_KEYFRAMES  = {{N_KEYFRAMES}}
+OUTPUT_MP4   = Path("{{OUTPUT_MP4}}")
+FRAMES_DIR   = Path("{{FRAMES_DIR}}")
+POS_BOUND    = 50.0     # |root pos| larger than this ⇒ exploded / launched
+FLOOR_MARGIN = -2.0     # root z below this ⇒ fell through the floor
+
+cfg = parse_env_cfg(TASK_ID, device="cuda:0", num_envs=NUM_ENVS, use_fabric=True)
+# Camera — THE SHARED HARBOR FRAMING. Do not invent a per-task angle.
+#
+# These are the same numbers render.py uses for every trained-policy video
+# (`viewer_eye` / `viewer_target` in
+# knowledge/templates/rl-integration-generator/custom_torch/scripts/render.py.template),
+# expressed here as env-relative viewer cfg. Sharing one angle is what makes renders
+# comparable ACROSS tasks and across candidates of the same task — insert-drawer,
+# stack-cube and a new task should be viewed from the same place, and two reward
+# candidates must differ only in behavior, not in where the camera stood.
+#
+# (IsaacLab's default viewer sits ~10 m out and yields a few pixels of table, which is
+# why the framing has to be set at all.)
+cfg.viewer.origin_type = "env"
+cfg.viewer.env_index   = 0
+cfg.viewer.eye         = (1.35, 1.00, 0.75)
+cfg.viewer.lookat      = (0.35, 0.0, 0.10)
+cfg.viewer.resolution  = (1280, 720)
+
+# OPTIONAL override — leave EMPTY unless the scene genuinely cannot be judged from the
+# shared angle (e.g. a tall fixture the default framing crops). If you do override, say so
+# in the process log: a non-standard angle makes this render incomparable to every other.
+{{VIEWER_OVERRIDE_BLOCK}}
+
+env = gym.make(TASK_ID, cfg=cfg, render_mode="rgb_array")
+unw = env.unwrapped
+obs, _ = env.reset(seed=0)
+
+action_space = env.action_space
+action_space.seed(0)
+
+
+def _entities():
+    out = []
+    out += list(getattr(unw.scene, "_articulations", {}).items())
+    out += list(getattr(unw.scene, "_rigid_objects", {}).items())
+    return out
+
+
+def assert_stable(step_idx):
+    flat = torch.cat([v.reshape(v.shape[0], -1) for v in obs.values()], dim=-1) if isinstance(obs, dict) else obs
+    assert torch.isfinite(flat).all(), f"S6 FAIL: non-finite obs at step {step_idx} — sim diverged"
+    for name, ent in _entities():
+        pos = ent.data.root_pos_w - unw.scene.env_origins      # env-local
+        assert torch.isfinite(pos).all(), f"S6 FAIL: non-finite root pos for '{name}' at step {step_idx}"
+        assert pos.abs().max() < POS_BOUND, f"S6 FAIL: '{name}' exploded (|pos|={pos.abs().max():.1f}) at step {step_idx}"
+        assert pos[:, 2].min() > FLOOR_MARGIN, f"S6 FAIL: '{name}' fell through floor (z={pos[:, 2].min():.2f}) at step {step_idx}"
+    {{STABILITY_CHECKS}}
+
+
+frames = []
+assert_stable(0)
+for step_idx in range(N_STEPS):
+    a = action_space.sample()
+    a_t = torch.from_numpy(np.asarray(a)).to("cuda:0")
+    if a_t.ndim == 1:
+        a_t = a_t.unsqueeze(0).expand(NUM_ENVS, -1).contiguous()
+    obs, _r, _term, _trunc, _info = env.step(a_t)
+    assert_stable(step_idx + 1)
+    frame = env.render()                          # (H, W, 3) uint8 of env 0's viewport
+    if frame is not None:
+        frames.append(np.asarray(frame, dtype=np.uint8))
+
+assert frames, "S6 FAIL: no RGB frames captured — check enable_cameras / render_mode='rgb_array'"
+motion = float(np.abs(np.diff(np.stack(frames).astype(np.int16), axis=0)).mean())
+assert motion > 0.5, f"S6 FAIL: video shows no motion (mean frame-diff {motion:.3f}) — actions not reaching the sim"
+
+# Write the MP4 + evenly-spaced keyframe PNGs next to task-history.md
+try:
+    import imageio.v2 as imageio
+except ImportError:
+    import imageio  # type: ignore[no-redef]
+
+OUTPUT_MP4.parent.mkdir(parents=True, exist_ok=True)
+FRAMES_DIR.mkdir(parents=True, exist_ok=True)
+imageio.mimsave(str(OUTPUT_MP4), frames, fps=30, codec="libx264", quality=8)
+
+idxs = np.linspace(0, len(frames) - 1, num=min(N_KEYFRAMES, len(frames)), dtype=int)
+for k, i in enumerate(idxs):
+    imageio.imwrite(str(FRAMES_DIR / f"keyframe_{k:02d}_step{i:03d}.png"), frames[i])
+
+size_kb = OUTPUT_MP4.stat().st_size / 1024
+V.done(f"stable for {N_STEPS} steps across {NUM_ENVS} envs; wrote {len(frames)} frames "
+      f"-> {OUTPUT_MP4} ({size_kb:.1f} KB) + {len(idxs)} keyframes in {FRAMES_DIR} "
+      f"(motion={motion:.2f}). Agent: inspect the keyframes for description-match + penetration.")
+env.close()
+sim_app.close()

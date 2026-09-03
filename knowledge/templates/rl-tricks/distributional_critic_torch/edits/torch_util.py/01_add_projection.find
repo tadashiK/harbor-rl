@@ -1,0 +1,4 @@
+    def load_state_dict(self, info):
+        self.mean = info[0]
+        self.var = info[1]
+        self.count = info[2]

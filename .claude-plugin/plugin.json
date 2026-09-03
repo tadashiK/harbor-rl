@@ -1,0 +1,24 @@
+{
+  "name": "harbor",
+  "description": "Set up Python simulation repos with uv, scaffold the RL stack (train / eval / render / sweep / tune), and author tasks end-to-end (scene → actions → reset → termination → observation → reward), with every stage gated by an executable check. Includes the dependency, benchmark, rl-integration, task and reward generator subagents and lifecycle hooks.",
+  "version": "0.2.0",
+  "author": {
+    "name": "Steven Li",
+    "url": "https://github.com/supersglzc"
+  },
+  "homepage": "https://github.com/supersglzc/harbor-rl",
+  "repository": "https://github.com/supersglzc/harbor-rl",
+  "license": "Apache-2.0",
+  "keywords": [
+    "robotics",
+    "uv",
+    "benchmark",
+    "rl",
+    "rl-tuning",
+    "ppo",
+    "sac",
+    "td3",
+    "stable-baselines3",
+    "wandb"
+  ]
+}

@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "benchmark": {
+    "name": "{{BENCHMARK_NAME}}",
+    "repo_path": "{{REPO_PATH}}",
+    "category": "rl"
+  },
+  "tasks": [{{TASKS_JSON}}],
+  "algorithm_source": {
+    "kind": "{{ALGORITHM_SOURCE_KIND}}",
+    "slug": "{{ALGORITHM_SLUG}}",
+    "package": "{{ALGORITHM_SOURCE_PACKAGE}}",
+    "parallel": {{PARALLEL}}
+  },
+  "scripts_dir": "harbor/scripts/rl/{{ALGORITHM_SLUG}}",
+  "algorithms": {
+    "ppo": {"class": "PPO", "config": "harbor/configs/rl/ppo{{PARALLEL_SUFFIX}}.yaml"},
+    "sac": {"class": "SAC", "config": "harbor/configs/rl/sac{{PARALLEL_SUFFIX}}.yaml"},
+    "td3": {"class": "TD3", "config": "harbor/configs/rl/td3{{PARALLEL_SUFFIX}}.yaml"}
+  },
+  "logging": {
+    "wandb": {
+      "enabled": {{WANDB_ENABLED}},
+      "project": "{{WANDB_PROJECT}}",
+      "entity": {{WANDB_ENTITY_JSON}},
+      "mode": "{{WANDB_MODE}}"
+    },
+    "local_dir": "harbor/rl_experiments"
+  },
+  "selection_metric": {
+    "primary": "success_rate",
+    "secondary": "eval_return_mean",
+    "tertiary": "sample_efficiency",
+    "stability_weight": 0.05
+  },
+  "training_defaults": {
+    "timesteps_per_trial": 100000,
+    "eval_episodes": 10,
+    "n_envs_cpu": 8,
+    "n_envs_gpu": 4096,
+    "seed": 42
+  }
+}

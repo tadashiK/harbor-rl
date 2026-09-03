@@ -1,0 +1,440 @@
+"""
+{{PROJECT_NAME}} — RL training entry point (stable-baselines3).
+
+Hydra-driven SB3 PPO/SAC/TD3. Uses harbor/scripts/rl/stable_baseline3/env_wrapper.py for env
+construction (so the same yaml configs work across all impls). Writes:
+
+    outputs/<algo>_<task>_<YYYYMMDD-HHMMSS>/
+        checkpoint.zip               — SB3 model
+        resolved_config.yaml         — hydra config snapshot
+        tb/                          — TensorBoard event files
+        metrics.jsonl                — per-record (step, key, value) log
+        curves/                      — PNG plots of training curves
+        train.log                    — stdout mirror
+
+W&B is wired automatically when cfg.wandb is set (use `wandb=null` to disable).
+
+Example:
+    python harbor/scripts/rl/stable_baseline3/train.py algo=ppo task={{DEFAULT_TASK}} total_timesteps=1_000_000
+    python harbor/scripts/rl/stable_baseline3/train.py algo=sac task={{DEFAULT_TASK}} total_timesteps=5000 wandb=null
+"""
+from __future__ import annotations
+
+import json
+import math
+import os
+import sys
+from collections import deque
+from datetime import datetime
+from pathlib import Path
+from typing import Type
+
+import numpy as np
+import torch
+
+import hydra
+from omegaconf import DictConfig, OmegaConf
+
+from stable_baselines3 import PPO, SAC, TD3, DDPG, A2C
+from stable_baselines3.common.base_class import BaseAlgorithm
+from stable_baselines3.common.callbacks import BaseCallback
+
+REPO     = Path(__file__).resolve().parents[4]   # actual repo root
+HARBOR = Path(__file__).resolve().parents[3]   # <repo>/harbor
+sys.path.insert(0, str(HARBOR))
+sys.path.insert(0, str(REPO))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from utils.data_logger import DataLogger  # noqa: E402
+from env_wrapper import create_env  # noqa: E402
+
+
+SB3_CLASS_MAP: dict[str, Type[BaseAlgorithm]] = {
+    "ppo": PPO, "sac": SAC, "td3": TD3, "ddpg": DDPG, "a2c": A2C,
+}
+
+
+def _algo_kwargs(cfg: DictConfig, algo: str) -> dict:
+    """Map unified yaml → SB3 __init__ kwargs.
+
+    The yaml schema is a superset; each SB3 class only consumes the keys it knows about.
+    """
+    common = {
+        "learning_rate": float(cfg.learning_rate),
+        "gamma":         float(cfg.gamma),
+        "verbose":       1,
+        "seed":          int(cfg.get("seed") or 0),
+        "policy_kwargs": OmegaConf.to_container(cfg.policy_kwargs, resolve=True),
+    }
+    if algo in ("ppo", "a2c"):
+        common.update({
+            "n_steps":       int(cfg.n_steps),
+            "gae_lambda":    float(cfg.gae_lambda),
+            "ent_coef":      float(cfg.ent_coef),
+            "vf_coef":       float(cfg.vf_coef),
+            "max_grad_norm": float(cfg.max_grad_norm),
+        })
+    if algo == "ppo":
+        common.update({
+            "batch_size":    int(cfg.batch_size),
+            "n_epochs":      int(cfg.n_epochs),
+            "clip_range":    float(cfg.clip_range),
+        })
+    if algo in ("sac", "td3", "ddpg"):
+        common.update({
+            "buffer_size":      int(cfg.get("buffer_size", 1_000_000)),
+            "learning_starts":  int(cfg.get("learning_starts", 100)),
+            "batch_size":       int(cfg.get("batch_size", 256)),
+            "tau":              float(cfg.get("tau", 0.005)),
+            "train_freq":       int(cfg.get("train_freq", 1)),
+            "gradient_steps":   int(cfg.get("gradient_steps", 1)),
+        })
+    return common
+
+
+# Whitelist remap: SB3 raw key → (canonical key, sign_flip). Anything NOT in this
+# table is dropped, so SB3 trainers emit exactly the same key set as the
+# custom_torch trainers (per commands/rl-add-log.md).
+#
+# SB3's `entropy_loss` is the negative entropy (used as a loss term); we
+# negate it to recover the true entropy as `train/entropy`.
+SB3_NAME_REMAP: dict[str, tuple[str, bool]] = {
+    "train/policy_loss":          ("train/loss/policy",   False),
+    "train/policy_gradient_loss": ("train/loss/policy",   False),
+    "train/value_loss":           ("train/loss/value",    False),
+    "train/entropy_loss":         ("train/entropy",       True),
+    "train/approx_kl":            ("train/approx_kl",     False),
+    "train/clip_fraction":        ("train/clip_fraction", False),
+    "train/actor_loss":           ("train/actor_loss",    False),
+    "train/critic_loss":          ("train/critic_loss",   False),
+}
+
+
+class _DataLoggerCallback(BaseCallback):
+    """Forward a whitelisted, canonical-named subset of SB3's metrics to DataLogger.
+
+    Three sources feed the canonical schema:
+
+    1. SB3's `model.logger.name_to_value` — filtered through `SB3_NAME_REMAP`
+       (drops any key not explicitly mapped).
+    2. Per-step episode trackers — `reward/total/episodic_return_mean` and
+       `train/episode_length` are computed here from the env's `rewards` / `dones`
+       buffers, with the same `Tracker(100)`-style window the custom_torch
+       trainers use. Independent of SB3's flaky rollout-aggregate flush cadence.
+    3. Off-policy diagnostics from a replay-buffer sample — `train/q_value`
+       (SAC/TD3) and `train/entropy` (SAC).
+    """
+    TRACKER_LEN = 100
+
+    def __init__(self, dl: DataLogger, metrics_log: list, jsonl_fp,
+                 algo: str, n_envs: int):
+        super().__init__()
+        self._dl = dl
+        self._metrics_log = metrics_log
+        self._jsonl_fp = jsonl_fp
+        self._algo = algo
+        self._n_envs = n_envs
+        self._cur_returns = np.zeros(n_envs, dtype=np.float64)
+        self._cur_lengths = np.zeros(n_envs, dtype=np.int64)
+        self._return_window: deque[float] = deque(maxlen=self.TRACKER_LEN)
+        self._length_window: deque[int] = deque(maxlen=self.TRACKER_LEN)
+        # Per-reward-term episodic tracking — lazy-init from info["detailed_reward"].
+        self._cur_term_returns: dict[str, np.ndarray] = {}
+        self._term_windows: dict[str, deque] = {}
+
+    def _record(self, key: str, value: float, step: int) -> None:
+        if not math.isfinite(value):
+            return
+        self._dl.record(key, value, step=step)
+        rec = {"step": step, "key": key, "value": value}
+        self._metrics_log.append(rec)
+        self._jsonl_fp.write(json.dumps(rec) + "\n")
+
+    def _on_step(self) -> bool:
+        rewards = self.locals.get("rewards")
+        dones = self.locals.get("dones")
+        if rewards is None or dones is None:
+            return True
+        rewards = np.asarray(rewards, dtype=np.float64).reshape(-1)
+        dones = np.asarray(dones, dtype=bool).reshape(-1)
+        n = min(rewards.shape[0], self._cur_returns.shape[0])
+        self._cur_returns[:n] += rewards[:n]
+        self._cur_lengths[:n] += 1
+
+        # Per-reward-term running sums — uses per-env info["detailed_reward"] dict.
+        infos = self.locals.get("infos") or []
+        for i in range(min(n, len(infos))):
+            info_i = infos[i] if isinstance(infos[i], dict) else {}
+            detailed = info_i.get("detailed_reward")
+            if not isinstance(detailed, dict):
+                continue
+            for k, v in detailed.items():
+                if k not in self._cur_term_returns:
+                    self._cur_term_returns[k] = np.zeros(self._n_envs, dtype=np.float64)
+                    self._term_windows[k] = deque(maxlen=self.TRACKER_LEN)
+                try:
+                    self._cur_term_returns[k][i] += float(v)
+                except (TypeError, ValueError):
+                    continue
+
+        if dones[:n].any():
+            step = int(self.num_timesteps)
+            done_idx = np.where(dones[:n])[0]
+            for i in done_idx:
+                self._return_window.append(float(self._cur_returns[i]))
+                self._length_window.append(int(self._cur_lengths[i]))
+                self._cur_returns[i] = 0.0
+                self._cur_lengths[i] = 0
+                for k in self._cur_term_returns:
+                    self._term_windows[k].append(float(self._cur_term_returns[k][i]))
+                    self._cur_term_returns[k][i] = 0.0
+            if self._return_window:
+                self._record("reward/total/episodic_return_mean",
+                             float(np.mean(self._return_window)), step)
+                self._record("train/episode_length",
+                             float(np.mean(self._length_window)), step)
+                for k, win in self._term_windows.items():
+                    if win:
+                        self._record(f"reward/{k}/episodic_return_mean",
+                                     float(np.mean(win)), step)
+        return True
+
+    def _on_rollout_end(self) -> None:
+        n2v = getattr(getattr(self.model, "logger", None), "name_to_value", None)
+        if not n2v:
+            return
+        step = int(self.num_timesteps)
+        for raw_k, v in dict(n2v).items():
+            mapped_entry = SB3_NAME_REMAP.get(raw_k)
+            if mapped_entry is None:
+                continue
+            mapped, flip = mapped_entry
+            try:
+                f = float(v)
+            except (TypeError, ValueError):
+                continue
+            if flip:
+                f = -f
+            self._record(mapped, f, step)
+        self._maybe_record_offpolicy_diagnostics(step)
+
+    def _maybe_record_offpolicy_diagnostics(self, step: int) -> None:
+        """Sample replay buffer once per rollout to emit canonical SAC/TD3 keys.
+
+        - `train/q_value` (SAC + TD3): mean of `min(Q1, Q2)` on the sample.
+        - `train/entropy` (SAC only): `-log_prob.mean()` from the actor.
+        Silent if the model isn't off-policy or the buffer is too small.
+        """
+        rb = getattr(self.model, "replay_buffer", None)
+        if rb is None or rb.size() < 64:
+            return
+        try:
+            data = rb.sample(64, env=getattr(self.model, "_vec_normalize_env", None))
+        except Exception:
+            return
+        try:
+            with torch.no_grad():
+                q1, q2 = self.model.critic(data.observations, data.actions)
+                q_mean = float(torch.min(q1, q2).mean().item())
+            self._record("train/q_value", q_mean, step)
+        except Exception:
+            pass
+        if self._algo == "sac":
+            try:
+                with torch.no_grad():
+                    _, log_prob = self.model.actor.action_log_prob(data.observations)
+                    ent_est = float(-log_prob.mean().item())
+                self._record("train/entropy", ent_est, step)
+            except Exception:
+                pass
+            try:
+                log_ent_coef = getattr(self.model, "log_ent_coef", None)
+                if log_ent_coef is not None:
+                    alpha = float(log_ent_coef.detach().exp().item())
+                else:
+                    alpha = float(getattr(self.model, "ent_coef", 0.0))
+                self._record("train/alpha", alpha, step)
+            except Exception:
+                pass
+
+
+def _render_and_log_video(model, cfg: DictConfig, log_dir: Path, step: int,
+                          use_wandb: bool, fps: int = 30, max_steps: int = 1000) -> Path | None:
+    """Run a deterministic rollout with the trained SB3 model and write
+    `<log_dir>/render.mp4`. If `use_wandb`, also log the video to W&B as
+    `render/video` (panel renders inline). Reference pattern matches
+    `humanoid_juggling/envs/train.py:record_video` block.
+    """
+    import numpy as np
+    try:
+        from env_wrapper import create_render_env
+        env = create_render_env(cfg)
+    except Exception as e:
+        print(f"[render] could not build render env: {e}", file=sys.stderr)
+        return None
+    try:
+        out = env.reset()
+        obs = out[0] if isinstance(out, tuple) else out
+        frames: list[np.ndarray] = []
+        ep_return = 0.0
+        for _ in range(max_steps):
+            try:
+                frame = env.render()
+                if isinstance(frame, np.ndarray):
+                    frames.append(frame.astype(np.uint8))
+            except Exception:
+                pass
+            action, _ = model.predict(obs, deterministic=True)
+            step_out = env.step(action)
+            if len(step_out) == 5:
+                obs, rew, term, trunc, _info = step_out
+                done = bool(term) or bool(trunc)
+            else:
+                obs, rew, done, _info = step_out
+            ep_return += float(rew)
+            if done:
+                try:
+                    frame = env.render()
+                    if isinstance(frame, np.ndarray):
+                        frames.append(frame.astype(np.uint8))
+                except Exception:
+                    pass
+                break
+        if not frames:
+            print("[render] no frames captured — skipping mp4 write", file=sys.stderr)
+            return None
+        try:
+            import imageio.v2 as imageio
+        except ImportError:
+            import imageio  # type: ignore[no-redef]
+        mp4 = log_dir / "render.mp4"
+        imageio.mimsave(str(mp4), frames, fps=fps, codec="libx264", quality=8)
+        print(f"[render] wrote {mp4} ({len(frames)} frames, return={ep_return:.4f})", flush=True)
+        if use_wandb:
+            try:
+                import wandb
+                # Pass the mp4 path directly — wandb loads it as-is (no moviepy
+                # needed; that's only required when passing a raw numpy array).
+                wandb.log({"render/video": wandb.Video(str(mp4), fps=fps, format="mp4")}, step=step)
+                print("[render] logged render/video to W&B", flush=True)
+            except Exception as e:
+                print(f"[render] wandb video log failed: {e}", file=sys.stderr)
+        return mp4
+    finally:
+        try:
+            env.close()
+        except Exception:
+            pass
+
+
+def _plot_curves(metrics: list[dict], out_dir: Path, title_prefix: str = "") -> None:
+    """One PNG per metric key, X=step, Y=value. Skips silently if matplotlib missing."""
+    if not metrics:
+        return
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError:
+        print("[plot] matplotlib not installed — skipping curve plots", file=sys.stderr)
+        return
+    out_dir.mkdir(parents=True, exist_ok=True)
+    by_key: dict[str, list[tuple[int, float]]] = {}
+    for r in metrics:
+        by_key.setdefault(r["key"], []).append((r["step"], r["value"]))
+    written = 0
+    for key, pts in by_key.items():
+        if not pts:
+            continue
+        pts.sort()
+        xs = [p[0] for p in pts]
+        ys = [p[1] for p in pts]
+        fig, ax = plt.subplots(figsize=(6, 4))
+        # Use marker so 1-point series (smoke-budget runs) still produces a visible dot.
+        ax.plot(xs, ys, linewidth=1.2, marker="o" if len(pts) <= 3 else None, markersize=4)
+        ax.set_xlabel("step")
+        ax.set_ylabel(key)
+        ax.set_title(f"{title_prefix}\n{key}" if title_prefix else key)
+        ax.grid(True, alpha=0.3)
+        fig.tight_layout()
+        safe = key.replace("/", "_").replace(" ", "_")
+        fig.savefig(out_dir / f"{safe}.png", dpi=110)
+        plt.close(fig)
+        written += 1
+    print(f"[plot] wrote {written}/{len(by_key)} curves to {out_dir}", flush=True)
+
+
+@hydra.main(version_base=None, config_path="../../../configs/rl", config_name="ppo")
+def main(cfg: DictConfig):
+    OmegaConf.set_struct(cfg, False)
+    algo = str(cfg.get("algo", "ppo"))
+    task = cfg.get("task")
+    if task is None:
+        print("[error] task=<id> is required (Hydra override).", file=sys.stderr)
+        sys.exit(2)
+    if algo not in SB3_CLASS_MAP:
+        print(f"[error] unknown algo '{algo}'. Choices: {list(SB3_CLASS_MAP)}", file=sys.stderr)
+        sys.exit(2)
+
+    # Default = random seed per run; pass seed=N for reproducibility. The drawn seed is
+    # written back into cfg so resolved_config.yaml / W&B / env_wrapper all see it.
+    seed = cfg.get("seed")
+    seed = int(seed) if seed is not None else int.from_bytes(os.urandom(4), "little") % (2**31)
+    cfg.seed = seed
+    print(f"[train] seed={seed}", flush=True)
+
+    env = create_env(cfg)
+
+    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    task_slug = str(task).replace('/', '_')
+    trial_id = f"{algo}_{task_slug}_{ts}"
+    log_dir = HARBOR / "outputs" / trial_id
+    log_dir.mkdir(parents=True, exist_ok=True)
+    (log_dir / "curves").mkdir(parents=True, exist_ok=True)
+
+    use_wandb = bool(cfg.get("wandb")) and cfg.get("wandb") not in ("null", "None", "")
+    # Override via Hydra `wandb_run_name=<...>` (used by /harbor:rl-tune to set v1, v2, ...).
+    wandb_run_name = str(cfg.get("wandb_run_name") or trial_id)
+    dl = DataLogger(
+        log_dir=str(log_dir),
+        log_tb=True,
+        log_wandb=use_wandb,
+        project=str(cfg.wandb) if use_wandb else None,
+        run_name=wandb_run_name,
+        config=OmegaConf.to_container(cfg, resolve=True) if use_wandb else None,
+    )
+    dl.log_text("config", OmegaConf.to_yaml(cfg, resolve=True), step=0)
+
+    metrics_log: list[dict] = []
+    metrics_jsonl = log_dir / "metrics.jsonl"
+    jsonl_fp = metrics_jsonl.open("w", buffering=1)
+
+    total_timesteps = int(cfg.get("total_timesteps", 1_000_000))
+    print(f"[train] algo={algo} task={task} n_envs={cfg.get('n_envs', 1)} "
+          f"total_timesteps={total_timesteps} wandb={'on' if use_wandb else 'off'}", flush=True)
+
+    model_cls = SB3_CLASS_MAP[algo]
+    model = model_cls(cfg.get("policy", "MlpPolicy"), env, **_algo_kwargs(cfg, algo))
+
+    n_envs = int(getattr(env, "num_envs", 1))
+    try:
+        model.learn(total_timesteps=total_timesteps,
+                    callback=_DataLoggerCallback(dl, metrics_log, jsonl_fp,
+                                                 algo=algo, n_envs=n_envs))
+        ckpt = log_dir / "checkpoint.zip"
+        model.save(str(ckpt))
+        dl.log_text("final/checkpoint_path", str(ckpt), step=total_timesteps)
+        print(f"[train] saved checkpoint to {ckpt}", flush=True)
+        if bool(cfg.get("record_video", True)):
+            _render_and_log_video(model, cfg, log_dir, total_timesteps, use_wandb,
+                                  fps=int(cfg.get("render_fps", 30)),
+                                  max_steps=int(cfg.get("render_max_steps", 1000)))
+    finally:
+        jsonl_fp.close()
+        dl.close()
+        (log_dir / "resolved_config.yaml").write_text(OmegaConf.to_yaml(cfg, resolve=True))
+        _plot_curves(metrics_log, log_dir / "curves", title_prefix=trial_id)
+
+
+if __name__ == "__main__":
+    main()

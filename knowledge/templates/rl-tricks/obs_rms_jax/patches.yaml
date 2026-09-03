@@ -1,0 +1,58 @@
+# obs_rms_jax — patch manifest.
+#
+# Each `file_patches[].edits[]` is a (find, replace) pair stored as raw text
+# in `edits/<file>.py/<id>.find` and `<id>.replace`. apply_trick.py reads
+# them verbatim and does literal find→replace on the rendered repo.
+#
+# Idempotent: re-running consumes nothing (find no longer matches once
+# replaced; the post-trick text is detected and reported as `[noop]`).
+#
+# `{slug}` resolves to algorithm_source.slug from harbor/rl-integration-generator/rl-suite-spec.json
+# (e.g. `custom_jax`).
+# `{algo}` cycles per algorithm in the manifest's `algorithms` list for
+# config_patches.
+
+file_patches:
+
+  # models/mlp.py — RunningMeanStd class + use_obs_rms field/branch in 5 networks
+  - file: harbor/scripts/rl/{slug}/models/mlp.py
+    edits:
+      - id: mlp_01_running_mean_std_class
+        find:    edits/mlp.py/mlp_01_running_mean_std_class.find
+        replace: edits/mlp.py/mlp_01_running_mean_std_class.replace
+      - id: mlp_02_diag_gaussian_actor
+        find:    edits/mlp.py/mlp_02_diag_gaussian_actor.find
+        replace: edits/mlp.py/mlp_02_diag_gaussian_actor.replace
+      - id: mlp_03_tanh_diag_gaussian_actor
+        find:    edits/mlp.py/mlp_03_tanh_diag_gaussian_actor.find
+        replace: edits/mlp.py/mlp_03_tanh_diag_gaussian_actor.replace
+      - id: mlp_04_tanh_det_actor_critic_doubleq
+        find:    edits/mlp.py/mlp_04_tanh_det_actor_critic_doubleq.find
+        replace: edits/mlp.py/mlp_04_tanh_det_actor_critic_doubleq.replace
+
+  # algo/ppo.py — read use_obs_rms from cfg.algo and pass to actor + critic.
+  - file: harbor/scripts/rl/{slug}/algo/ppo.py
+    edits:
+      - id: ppo_01_pass_use_obs_rms
+        find:    edits/ppo.py/ppo_01_pass_use_obs_rms.find
+        replace: edits/ppo.py/ppo_01_pass_use_obs_rms.replace
+
+  # algo/sac.py — same shape as ppo.
+  - file: harbor/scripts/rl/{slug}/algo/sac.py
+    edits:
+      - id: sac_01_pass_use_obs_rms
+        find:    edits/sac.py/sac_01_pass_use_obs_rms.find
+        replace: edits/sac.py/sac_01_pass_use_obs_rms.replace
+
+  # algo/td3.py
+  - file: harbor/scripts/rl/{slug}/algo/td3.py
+    edits:
+      - id: td3_01_pass_use_obs_rms
+        find:    edits/td3.py/td3_01_pass_use_obs_rms.find
+        replace: edits/td3.py/td3_01_pass_use_obs_rms.replace
+
+# Config patches: add `use_obs_rms: true` to each algorithm's parallel.yaml.
+config_patches:
+  - file: harbor/configs/rl/{algo}.parallel.yaml
+    key: use_obs_rms
+    value: true

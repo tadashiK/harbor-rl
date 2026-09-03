@@ -1,0 +1,24 @@
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+.pytest_cache/
+.DS_Store
+*.un~
+*.swp
+_logs/
+
+harness-refactor/
+
+output/
+outputs/
+plot_output/
+*.mp4
+!docs/public/demo.mp4
+*.pdf
+.claude/settings.local.json
+
+# docs site
+node_modules/
+docs/.vitepress/dist/
+docs/.vitepress/cache/

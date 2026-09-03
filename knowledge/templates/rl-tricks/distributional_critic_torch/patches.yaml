@@ -1,0 +1,49 @@
+# distributional_critic_torch — C51 distributional critic for TD3 (custom_torch).
+
+file_patches:
+  - file: harbor/scripts/rl/{slug}/utils/torch_util.py
+    edits:
+      - id: torch_util_01_add_projection
+        find:    edits/torch_util.py/01_add_projection.find
+        replace: edits/torch_util.py/01_add_projection.replace
+
+  - file: harbor/scripts/rl/{slug}/models/mlp.py
+    edits:
+      - id: mlp_01_add_distributional_double_q
+        find:    edits/mlp.py/01_add_distributional_double_q.find
+        replace: edits/mlp.py/01_add_distributional_double_q.replace
+
+  - file: harbor/scripts/rl/{slug}/algo/ac_base.py
+    edits:
+      - id: ac_base_01_thread_cri_kwargs
+        find:    edits/ac_base.py/01_thread_cri_kwargs.find
+        replace: edits/ac_base.py/01_thread_cri_kwargs.replace
+
+  - file: harbor/scripts/rl/{slug}/algo/td3.py
+    edits:
+      - id: td3_01_branch_distributional_critic
+        find:    edits/td3.py/01_branch_distributional_critic.find
+        replace: edits/td3.py/01_branch_distributional_critic.replace
+
+  - file: harbor/scripts/rl/{slug}/algo/sac.py
+    edits:
+      - id: sac_01_branch_distributional_critic
+        find:    edits/sac.py/01_branch_distributional_critic.find
+        replace: edits/sac.py/01_branch_distributional_critic.replace
+
+config_patches:
+  - file: harbor/configs/rl/{algo}.parallel.yaml
+    key: cri_class
+    value: DistributionalDoubleQ
+  - file: harbor/configs/rl/{algo}.parallel.yaml
+    key: distributional_critic
+    value: true
+  - file: harbor/configs/rl/{algo}.parallel.yaml
+    key: v_min
+    value: -10.0
+  - file: harbor/configs/rl/{algo}.parallel.yaml
+    key: v_max
+    value: 10.0
+  - file: harbor/configs/rl/{algo}.parallel.yaml
+    key: num_atoms
+    value: 51

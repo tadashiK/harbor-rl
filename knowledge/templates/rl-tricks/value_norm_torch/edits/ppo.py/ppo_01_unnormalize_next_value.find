@@ -1,0 +1,3 @@
+            n_obs = self.obs_rms.normalize(next_obs) if self.obs_rms is not None else next_obs
+            next_value = self.critic(n_obs).flatten()
+            advantages = torch.zeros_like(rewards)

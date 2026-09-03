@@ -1,0 +1,12 @@
+                v = self.critic(
+                    self.obs_rms.normalize(obs[b]) if self.obs_rms is not None else obs[b]
+                ).flatten()
+                if bool(self.cfg.algo.get("value_clip", False)):
+                    v_loss_unclipped = (v - returns[b]) ** 2
+                    v_clipped = old_values[b] + torch.clamp(
+                        v - old_values[b], -clip, clip,
+                    )
+                    v_loss_clipped = (v_clipped - returns[b]) ** 2
+                    v_loss = 0.5 * torch.max(v_loss_unclipped, v_loss_clipped).mean()
+                else:
+                    v_loss = 0.5 * ((v - returns[b]) ** 2).mean()

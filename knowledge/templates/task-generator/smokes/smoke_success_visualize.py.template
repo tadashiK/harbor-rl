@@ -1,0 +1,70 @@
+"""Visualize the success scenario — holds the configuration open in a continuous
+loop. Sibling of `smoke_success.py` but skips the assertion and never exits on
+its own. Useful for confirming geometry visually (cups nest cleanly, robot is
+in the right pose, etc.).
+
+Defaults: HEADED (`HEADLESS=0`), NUM_ENVS=1. Override either via env var.
+
+Substitutions:
+  TASK_ID              — gym task id
+  SUCCESS_HOLD_BLOCK   — Python lines that pin the scene entities to their
+                              success poses EVERY frame. Distinct from the
+                              `SUCCESS_FORCE_BLOCK` used by `smoke_success.py`:
+                                (1) MUST also pin the "anchor" / "goal" entity
+                                    so it does not drift under gravity;
+                                (2) MUST zero linear + angular velocities each
+                                    frame to prevent jitter from accumulated
+                                    integration error.
+                              Pattern (cache the anchor pose once, then re-write
+                              all entities + zero velocities each frame).
+"""
+import argparse
+import sys
+
+# Kit's shutdown can kill the process before stdout flushes, losing the
+# `S<N> OK:` verdict line that IS this smoke's pass criterion.
+sys.stdout.reconfigure(line_buffering=True)
+import os
+import torch
+from isaaclab.app import AppLauncher
+
+parser = argparse.ArgumentParser()
+AppLauncher.add_app_launcher_args(parser)
+args = parser.parse_args([])
+# Default HEADED for visualization; flip with HEADLESS=1 for headless validation.
+args.headless = os.environ.get("HEADLESS", "0") != "0"
+args.enable_cameras = False
+sim_app = AppLauncher(args).app
+
+import gymnasium as gym  # noqa: E402
+import isaaclab_tasks    # noqa: F401, E402
+from isaaclab_tasks.utils import parse_env_cfg  # noqa: E402
+
+TASK_ID  = "{{TASK_ID}}"
+NUM_ENVS = int(os.environ.get("NUM_ENVS", "1"))
+
+cfg = parse_env_cfg(TASK_ID, device="cuda:0", num_envs=NUM_ENVS, use_fabric=True)
+env = gym.make(TASK_ID, cfg=cfg)
+unw = env.unwrapped
+obs, _ = env.reset(seed=0)
+
+print(f"[visualize] holding success scenario  task={TASK_ID}  num_envs={NUM_ENVS}  headless={args.headless}")
+print(f"[visualize] Press Ctrl+C (or close the GLFW window) to exit.")
+
+frame = 0
+try:
+    while sim_app.is_running():
+        # Re-pin entities to the success configuration (poses + zero velocities)
+        {{SUCCESS_HOLD_BLOCK}}
+        # Advance physics + render one frame. Physics will try to drift the
+        # entities (gravity, friction) but the next iteration's writes pin them
+        # back, so the displayed configuration stays stable.
+        unw.sim.step(render=True)
+        frame += 1
+        if frame % 300 == 0:
+            print(f"[visualize] {frame} frames rendered (Ctrl+C to exit)")
+except KeyboardInterrupt:
+    print("[visualize] interrupted by user")
+
+env.close()
+sim_app.close()

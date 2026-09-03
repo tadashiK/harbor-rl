@@ -1,0 +1,112 @@
+/* HARBOR brand tokens layered over VitePress defaults.
+   Harbor Teal is the one accent; it is chosen to hold contrast on both the light and the
+   dark ground, so the mark and the links never need a per-theme colour swap. */
+:root {
+  --vp-c-brand-1: #0B8A99;
+  --vp-c-brand-2: #0FB6C9;
+  --vp-c-brand-3: #0FB6C9;
+  --vp-c-brand-soft: rgba(15, 182, 201, 0.14);
+
+  --vp-home-hero-name-color: transparent;
+  --vp-home-hero-name-background: linear-gradient(120deg, #0FB6C9 30%, #3DD9C4);
+  --vp-home-hero-image-background-image: linear-gradient(-45deg, #0FB6C9 40%, #1E6E8C 60%);
+  --vp-home-hero-image-filter: blur(56px);
+}
+
+.dark {
+  /* On the dark ground the mid-tone teal muddies against #1b1b1f, so links move up a step
+     while the brand fill stays put. */
+  --vp-c-brand-1: #2BD3E3;
+  --vp-c-brand-2: #0FB6C9;
+  --vp-c-brand-3: #0FB6C9;
+}
+
+/* Wider than VitePress ships. The defaults are tuned for narrow prose, which leaves the
+   command reference — wide three-column tables — squeezed into ~688px with acres of margin
+   either side. These four variables are the whole layout chain: the outer shell, the doc
+   column, the prose measure, and the aside. */
+:root {
+  --vp-layout-max-width: 1680px;
+  --vp-sidebar-width: 260px;
+}
+
+.VPDoc .container {
+  max-width: 1320px !important;
+}
+
+.VPDoc .content {
+  max-width: 1060px !important;
+}
+
+.VPDoc.has-aside .content-container {
+  max-width: 1060px !important;
+}
+
+.VPNavBar .container,
+.VPNavBar .content-body {
+  max-width: none !important;
+}
+
+/* Tables carry most of the reference, so let them use the full measure and centre the
+   non-label columns — a reader scans a column rather than parsing each row. */
+.vp-doc table {
+  display: table;
+  width: 100%;
+}
+
+.vp-doc th:not(:first-child),
+.vp-doc td:not(:first-child) {
+  text-align: center;
+}
+
+/* The command reference's Purpose column is prose, not a value; centring it is unreadable. */
+.vp-doc td:last-child {
+  text-align: left;
+}
+
+/* Wide content must scroll inside its own box, never the page body. */
+.vp-doc div[class*='language-'],
+.vp-doc table {
+  overflow-x: auto;
+}
+
+/* The four claims, rendered as cards inside "Why a harness".
+   VitePress only draws `features:` cards above the fold on the home layout, and these belong
+   beside the argument they support — so the markup is by hand and the styling borrows the
+   same theme tokens the built-in cards use, which is what keeps them right in both themes.
+   The h3 rules are overrides: .vp-doc gives headings a top margin and rule that look wrong
+   inside a card. */
+.harbor-cards {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 16px;
+  margin: 2rem 0;
+}
+
+@media (max-width: 640px) {
+  .harbor-cards { grid-template-columns: 1fr; }
+}
+
+.harbor-card {
+  padding: 20px 24px;
+  border: 1px solid var(--vp-c-divider);
+  border-radius: 12px;
+  background-color: var(--vp-c-bg-soft);
+  text-align: center;
+}
+
+.vp-doc .harbor-card h3 {
+  margin: 0 0 8px;
+  padding-top: 0;
+  border-top: none;
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 24px;
+}
+
+.vp-doc .harbor-card p {
+  margin: 0;
+  font-size: 14px;
+  line-height: 24px;
+  color: var(--vp-c-text-2);
+}

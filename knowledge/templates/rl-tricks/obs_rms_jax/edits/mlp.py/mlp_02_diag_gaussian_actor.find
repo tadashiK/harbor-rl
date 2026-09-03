@@ -1,0 +1,15 @@
+
+
+class TanhDiagGaussianActor(nn.Module):
+    """SAC actor — tanh-squashed Gaussian with state-dependent log-std."""
+    action_dim: int
+    hidden_dims: Sequence[int] = (256, 256)
+    activation: str = "relu"
+    log_std_min: float = -5.0
+    log_std_max: float = 2.0
+
+    @nn.compact
+    def __call__(self, x):
+        # output = (mean, raw_log_std) of shape (..., 2 * action_dim)
+        out = MLP(self.hidden_dims, 2 * self.action_dim, self.activation,
+                  output_init_scale=0.01)(x)

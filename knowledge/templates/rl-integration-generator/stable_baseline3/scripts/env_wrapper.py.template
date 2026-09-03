@@ -1,0 +1,116 @@
+"""
+{{PROJECT_NAME}} — env factory for stable-baselines3 train/eval/render.
+
+Exposes:
+    create_env(cfg)         → SB3 VecEnv (DummyVecEnv or SubprocVecEnv) for headless training/eval
+    create_render_env(cfg)  → single env with offscreen rendering enabled (for render.py video)
+
+Branching is on cfg.gpu_sim (read by the agent from harbor/benchmark-generator/benchmark-spec.json into the
+hydra config). For SB3 the GPU/CPU branch only changes whether we do SubprocVecEnv (CPU) or
+a thin wrapper around the benchmark's own batched factory (GPU). Most users hit the CPU path.
+"""
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+from typing import Callable
+
+REPO     = Path(__file__).resolve().parents[4]   # actual repo root
+HARBOR = Path(__file__).resolve().parents[3]   # <repo>/harbor
+sys.path.insert(0, str(HARBOR))
+sys.path.insert(0, str(REPO))
+
+
+def _maybe_flatten_obs(env):
+    """If env exposes a Dict observation space, wrap with FlattenObservation so
+    SB3's `MlpPolicy` (the default in our YAML configs) works without the user
+    having to override `policy=MultiInputPolicy`. No-op for Box obs.
+    """
+    try:
+        import gymnasium as gym
+        if isinstance(env.observation_space, gym.spaces.Dict):
+            return gym.wrappers.FlattenObservation(env)
+    except Exception:
+        pass
+    return env
+
+
+def _make_single_env(task_id: str, render_mode=None, seed: int = 0):
+    """Build ONE env instance.
+
+    Lookup order:
+      1. scripts/_<family>_env.py:make_<family>_env(task, render_mode=...)  — auto-detected
+         convention used by benchmark-generator helpers (e.g. _dm_env.py).
+      2. gymnasium.make(task_id, render_mode=render_mode) — standard gym fallback.
+
+    Dict observations (e.g. dm_control via shimmy) are automatically flattened so
+    the default `MlpPolicy` works.
+    """
+    # Auto-detect benchmark-generator helper (e.g., scripts/_dm_env.py).
+    scripts_dir = REPO / "scripts"
+    if scripts_dir.is_dir():
+        for helper in scripts_dir.glob("_*_env.py"):
+            # _isaaclab_env.py (reward-add-log Path B helper) is NOT a Path-A
+            # family factory — it needs Kit booted and is consumed on the
+            # gpu_sim branch. Importing it here (pre-boot) dies on pxr.
+            if helper.name == "_isaaclab_env.py":
+                continue
+            # Drop the repo root from sys.path so the helper's `from <pkg>
+            # import ...` finds the installed wheel, not a mounted source tree
+            # (e.g. dm_control checks its own source into the repo root).
+            _saved_path = list(sys.path)
+            sys.path[:] = [p for p in sys.path if Path(p).resolve() != REPO]
+            sys.path.insert(0, str(scripts_dir))
+            try:
+                module = __import__(helper.stem)
+            except Exception:
+                sys.path[:] = _saved_path
+                continue
+            for name in dir(module):
+                if name.startswith("make_") and name.endswith("_env"):
+                    fn = getattr(module, name)
+                    try:
+                        result = fn(task_id, render_mode=render_mode)
+                    except TypeError:
+                        result = fn(task_id)
+                    sys.path[:] = _saved_path
+                    return _maybe_flatten_obs(result)
+            sys.path[:] = _saved_path
+            break  # Found a helper but no make_*_env — fall through to gymnasium.
+    # Standard gymnasium fallback.
+    import gymnasium as gym
+    env = gym.make(task_id, render_mode=render_mode)
+    return _maybe_flatten_obs(env)
+
+
+def create_env(cfg):
+    """Headless VecEnv for train.py / eval.py.
+
+    cfg.n_envs: number of parallel envs (1 → DummyVecEnv, >1 → SubprocVecEnv)
+    cfg.task:   task id string
+    cfg.seed:   base random seed
+    """
+    from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
+
+    n = int(cfg.get("n_envs", 1))
+    task = str(cfg.get("task"))
+    seed = int(cfg.get("seed") or 0)
+
+    def _factory(idx: int) -> Callable:
+        def _f():
+            return _make_single_env(task, render_mode=None, seed=seed + idx)
+        return _f
+
+    if n == 1:
+        return DummyVecEnv([_factory(0)])
+    return SubprocVecEnv([_factory(i) for i in range(n)])
+
+
+def create_render_env(cfg):
+    """Single env with offscreen rendering enabled — used by render.py to write an MP4.
+
+    Always n_envs=1 by contract. render_mode='rgb_array' so frames can be captured headlessly.
+    """
+    task = str(cfg.get("task"))
+    seed = int(cfg.get("seed") or 0)
+    return _make_single_env(task, render_mode="rgb_array", seed=seed)

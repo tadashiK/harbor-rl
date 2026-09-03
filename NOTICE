@@ -1,0 +1,50 @@
+HARBOR: A Harness Framework for Agentic Robot Reinforcement Learning
+Copyright 2026 The HARBOR Authors
+
+This product includes software developed at
+TU Darmstadt, Honda Research Institute Europe, Columbia University,
+Tongji University, Shanghai Research Institute for Intelligent Autonomous
+Systems, University of Wuerzburg, and Hessian.AI.
+
+Licensed under the Apache License, Version 2.0 (the "License"); you may not
+use this file except in compliance with the License. You may obtain a copy of
+the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+License for the specific language governing permissions and limitations under
+the License.
+
+--------------------------------------------------------------------------------
+
+This product includes third-party software and third-party source excerpts:
+
+  * The custom_torch algorithm tree is adapted from PQL
+    (https://github.com/Improbable-AI/pql), Copyright (c) 2023 Improbable AI Lab,
+    MIT License.
+
+  * The custom_jax algorithm tree ports the algorithmic recipe of LocoMuJoCo
+    (https://github.com/robfiras/loco-mujoco), Copyright (c) 2024 Al-Hafez,
+    MIT License.
+
+  * Task-library entries reproduce substantial excerpts of Isaac Lab
+    (https://github.com/isaac-sim/IsaacLab), Copyright (c) 2022-2025 The Isaac Lab
+    Project Developers, BSD-3-Clause; and of ManiSkill
+    (https://github.com/haosulab/ManiSkill), Apache License 2.0.
+
+The full retained notices are in THIRD_PARTY_NOTICES.md.
+
+--------------------------------------------------------------------------------
+
+If you use HARBOR in your research, please cite:
+
+    @article{li2026harbor,
+      title   = {HARBOR: A Harness Framework for Agentic Robot Reinforcement Learning},
+      author  = {Li, Zechu and Jin, Yufeng and Liu, Xiaoyang and Liu, Puze and
+                 Prasad, Vignesh and D'Eramo, Carlo and Chalvatzaki, Georgia},
+      journal = {arXiv preprint arXiv:2606.08610},
+      year    = {2026}
+    }

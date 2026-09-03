@@ -1,0 +1,4 @@
+# Test-only deps (NOT runtime plugin deps). Install with:
+#   pip install -r tests/requirements-test.txt
+pytest>=7
+pyyaml>=5

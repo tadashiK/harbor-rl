@@ -1,0 +1,56 @@
+name: Bug report
+description: A stage failed, a gate misfired, or generated code did not work
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        HARBOR writes an inspectable record of every run. Attaching those artifacts is
+        usually more useful than a reproduction script — they contain what was tried and
+        what each check observed.
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What did you ask HARBOR to do?
+      description: The command or prompt, verbatim.
+      placeholder: /harbor:task-create name=... description="..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What happened, and what did you expect?
+    validations:
+      required: true
+
+  - type: input
+    id: stage
+    attributes:
+      label: Which stage failed?
+      placeholder: task-generator §2 actions, reward-tune candidate 3, rl-integration smoke T4, ...
+
+  - type: textarea
+    id: artifacts
+    attributes:
+      label: Artifacts
+      description: |
+        Paste or attach whichever exist:
+        `harbor/<agent>/history.md` · `harbor/create-task/<slug>/task-history.md` ·
+        the failing `smokes/<name>.verdict.json` · the relevant `outputs/.../metrics.jsonl` tail
+      render: text
+
+  - type: textarea
+    id: env
+    attributes:
+      label: Environment
+      description: Simulator and commit, GPU and driver, `uv --version`, Claude Code version, OS.
+      placeholder: |
+        Simulator: IsaacLab @ abc1234
+        GPU: RTX 4090, driver 550.54
+        uv: 0.5.11
+        Claude Code: 2.1.219
+        OS: Ubuntu 22.04
+    validations:
+      required: true

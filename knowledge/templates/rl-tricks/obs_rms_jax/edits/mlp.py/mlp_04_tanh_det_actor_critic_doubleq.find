@@ -1,0 +1,23 @@
+# Critics
+# -----------------------------------------------------------------------------
+class MLPCritic(nn.Module):
+    """PPO critic — single scalar value head."""
+    hidden_dims: Sequence[int] = (256, 256)
+    activation: str = "tanh"
+
+    @nn.compact
+    def __call__(self, x):
+        v = MLP(self.hidden_dims, 1, self.activation, output_init_scale=1.0)(x)
+        return jnp.squeeze(v, axis=-1)
+
+
+class DoubleQ(nn.Module):
+    """Twin Q networks (SAC / TD3). Concatenates obs + action then runs two MLPs."""
+    hidden_dims: Sequence[int] = (256, 256)
+    activation: str = "relu"
+
+    @nn.compact
+    def __call__(self, obs, action):
+        x = jnp.concatenate([obs, action], axis=-1)
+        q1 = MLP(self.hidden_dims, 1, self.activation, output_init_scale=1.0,
+                 name="q1")(x)

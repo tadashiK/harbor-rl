@@ -1,0 +1,6 @@
+        })
+    cfg.num_envs = int(cfg.get("n_envs", cfg.get("num_envs", 1)))
+    cfg.gpu_sim = True
+
+    task = cfg.get("task")
+    ckpt_path = cfg.get("checkpoint")

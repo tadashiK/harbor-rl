@@ -1,0 +1,12 @@
+    return d
+
+
+def _build_loco_mujoco_env(task: str, env_params: dict):
+    """Build a loco-mujoco MJX env wrapped with LogWrapper + VecEnv.
+
+    Mirrors the canonical wrapper stack from loco_mujoco.algorithms.ppo_jax
+    (see PPOJax._wrap_env): LogWrapper for episode-return / length tracking,
+    VecEnv for the vmap'd reset/step contract.
+
+    loco-mujoco maintains TWO parallel registries:
+      - `<Name>`     → CPU-only Mujoco backend (no `_first_data`, no mjx_reset)

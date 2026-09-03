@@ -1,0 +1,17 @@
+# value_norm_torch — patches custom_torch ppo.py::_compute_adv so the value
+# head trains against normalized targets.
+
+file_patches:
+  - file: harbor/scripts/rl/{slug}/algo/ppo.py
+    edits:
+      - id: ppo_01_unnormalize_next_value
+        find:    edits/ppo.py/ppo_01_unnormalize_next_value.find
+        replace: edits/ppo.py/ppo_01_unnormalize_next_value.replace
+      - id: ppo_02_normalize_returns_values
+        find:    edits/ppo.py/ppo_02_normalize_returns_values.find
+        replace: edits/ppo.py/ppo_02_normalize_returns_values.replace
+
+config_patches:
+  - file: harbor/configs/rl/{algo}.parallel.yaml
+    key: value_norm
+    value: true

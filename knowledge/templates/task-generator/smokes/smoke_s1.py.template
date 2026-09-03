@@ -1,0 +1,449 @@
+"""S1 smoke — registration, spaces, timing, collision geometry, articulation limits.
+
+Rendered by task-generator. Seven checks, each reported on its own `[Cn] PASS|FAIL` line. Every
+one runs on every invocation — there is no skip path and no early return, so a later check
+cannot hide behind an earlier failure. The smoke exits non-zero if ANY check failed.
+
+  C1  registration + build      the id is registered, its cfg entry point resolves, gym.make works
+  C2  action space              declared space == sum of the action manager's term dims
+  C3  observation space         declared per-group space == the tensor reset() actually returns
+  C4  max episode length        matches ceil(episode_length_s / step_dt) and is > 0
+  C5  timing                    sim dt · decimation · step_dt agree, and the episode divides evenly
+  C6  collision geometry        every asset has colliders, and no concave mesh is silently
+                                approximated by its convex hull
+  C7  articulation limits       every articulated object's joints REACH their limits under full
+                                drive, STOP there, and stay there — no overshoot, no bounce-back
+  C8  collision provenance      every mesh collider is a PRE-decomposed CoACD part within the
+                                hull budget — not one prim handed to the simulator's own cooker
+
+Substitutions:
+  TASK_ID              — gym task id (e.g. Isaac-Push-Block-Franka-v0)
+  NUM_ENVS             — envs to build (2 for gpu-sim)
+  COLLISION_REVIEWED   — python list of collider prim paths (str) you have inspected and
+                         accepted as convex-safe, e.g. [] or ["/World/envs/env_0/Table/geom"].
+                         C6 fails on any risky collider not in this list. Accepting one is a
+                         DECISION: record it, with the reason, in task-history.md §1 Analysis.
+  CONVEXITY_MIN        — mesh_volume / hull_volume below which a mesh counts as concave
+                         (0.95 is a good default; a convex mesh scores ~1.0)
+  ARTICULATION_EXCLUDE — python list of names C7 skips: a whole asset ("robot") or one joint
+                         ("cabinet.drawer_top_joint"). The action-driven robot belongs here —
+                         S2/S2.5 own its joints. Everything else is discovered and tested, so a
+                         cabinet added later is covered without editing this list.
+  LIMIT_REACH_FRAC     — how far short of a limit still counts as reaching it, as a fraction of
+                         the joint's range (0.05 is a good default)
+  LIMIT_VIOLATION_FRAC — how far past a limit is tolerated, same units (0.02)
+  LIMIT_SETTLE_FRAC    — position spread over the final steps that still counts as settled (0.02)
+  LIMIT_DRIVE_STEPS    — physics steps to drive each joint toward each limit (120)
+  MAX_HULLS            — hull budget per asset for C8 (32). Every mesh asset must be decomposed
+                         AHEAD OF TIME by scripts/task-generator/coacd_decompose.py, which
+                         writes a <asset>.coacd.json manifest beside it; C8 reads that manifest
+                         and cross-checks it against what the stage actually loaded.
+  PRIMITIVE_ASSETS     — python list of scene asset names whose colliders are analytic shapes
+                         or intentionally exact (a table's box, a kinematic peg's cylinder), so
+                         C8 does not demand a decomposition for them. Each entry is a DECISION:
+                         record it in task-history.md §1 Analysis.
+"""
+import argparse
+import math
+import re
+import sys
+
+# Kit's shutdown can kill the process before stdout flushes, losing the
+# `S<N> OK:` verdict line that IS this smoke's pass criterion.
+sys.stdout.reconfigure(line_buffering=True)
+from _verdict import Verdict   # noqa: E402  — sibling module, rendered alongside
+V = Verdict("S1")
+from isaaclab.app import AppLauncher
+
+parser = argparse.ArgumentParser()
+AppLauncher.add_app_launcher_args(parser)
+args = parser.parse_args([])
+args.headless = True
+args.enable_cameras = False
+sim_app = AppLauncher(args).app
+
+import numpy as np       # noqa: E402
+import torch             # noqa: E402
+import gymnasium as gym  # noqa: E402
+import isaaclab_tasks    # noqa: F401, E402  — registers all tasks
+from isaaclab_tasks.utils import parse_env_cfg  # noqa: E402
+
+TASK_ID = "{{TASK_ID}}"
+NUM_ENVS = {{NUM_ENVS}}
+COLLISION_REVIEWED = {{COLLISION_REVIEWED}}
+CONVEXITY_MIN = {{CONVEXITY_MIN}}
+ARTICULATION_EXCLUDE = {{ARTICULATION_EXCLUDE}}
+LIMIT_REACH_FRAC = {{LIMIT_REACH_FRAC}}
+LIMIT_VIOLATION_FRAC = {{LIMIT_VIOLATION_FRAC}}
+LIMIT_SETTLE_FRAC = {{LIMIT_SETTLE_FRAC}}
+LIMIT_DRIVE_STEPS = {{LIMIT_DRIVE_STEPS}}
+MAX_HULLS = {{MAX_HULLS}}
+PRIMITIVE_ASSETS = {{PRIMITIVE_ASSETS}}
+
+# ------------------------------------------------------------------ C1  registration + build
+spec = gym.registry.get(TASK_ID)
+if spec is None:
+    V.check("C1", "registration", False,
+            f"{TASK_ID} is not in gym.registry — the module holding gym.register is never "
+            f"imported, or the id has a typo")
+    # done() BEFORE the teardown here too: done() is what exits non-zero once a check has
+    # failed, so if Kit's shutdown takes the process first this FAILING path exits 0.
+    V.done("C1 failed — task not registered")
+    sim_app.close()
+
+cfg_entry = spec.kwargs.get("env_cfg_entry_point")
+print(f"      entry_point         = {spec.entry_point}")
+print(f"      env_cfg_entry_point = {cfg_entry}")
+print(f"      register kwargs     = {sorted(spec.kwargs)}")
+
+cfg = parse_env_cfg(TASK_ID, device="cuda:0", num_envs=NUM_ENVS, use_fabric=True)
+env = gym.make(TASK_ID, cfg=cfg)
+unw = env.unwrapped
+V.check("C1", "registration + build", cfg_entry is not None and unw.num_envs == NUM_ENVS,
+        f"built {TASK_ID} with num_envs={unw.num_envs} (requested {NUM_ENVS})")
+
+# ------------------------------------------------------------------ C2  action space
+term_dims = dict(zip(unw.action_manager.active_terms, unw.action_manager.action_term_dim))
+declared = int(np.prod(unw.single_action_space.shape))
+total = int(unw.action_manager.total_action_dim)
+V.check("C2", "action space", declared == total == sum(term_dims.values()),
+        f"single_action_space {tuple(unw.single_action_space.shape)} vs terms {term_dims} "
+        f"(total_action_dim={total})")
+
+# ------------------------------------------------------------------ C3  observation space
+obs, _ = env.reset()
+obs_detail, obs_ok = [], True
+# `.spaces` throughout: gym.spaces.Dict's `in` / iteration are SAMPLE operations, not
+# key lookups — `"policy" in space` is False for every task.
+for group, space in unw.single_observation_space.spaces.items():
+    if group not in obs:
+        obs_ok = False
+        obs_detail.append(f"{group}: declared but absent from reset()")
+        continue
+    actual = tuple(obs[group].shape[1:])
+    finite = bool(np.isfinite(obs[group].detach().cpu().numpy()).all())
+    match = actual == tuple(space.shape)
+    obs_ok &= match and finite
+    obs_detail.append(f"{group}: declared {tuple(space.shape)} actual {actual}"
+                      f"{'' if match else ' MISMATCH'}{'' if finite else ' NON-FINITE'}")
+extra = [g for g in obs if g not in unw.single_observation_space.spaces]
+if extra:
+    obs_ok = False
+    obs_detail.append(f"returned but undeclared: {extra}")
+V.check("C3", "observation space", obs_ok, "; ".join(obs_detail))
+
+# ------------------------------------------------------------------ C4  max episode length
+sim_dt = float(unw.cfg.sim.dt)
+decimation = int(unw.cfg.decimation)
+step_dt = float(getattr(unw, "step_dt", sim_dt * decimation))
+episode_s = float(unw.cfg.episode_length_s)
+expected_len = math.ceil(episode_s / step_dt)
+V.check("C4", "max episode length",
+        unw.max_episode_length > 0 and unw.max_episode_length == expected_len,
+        f"max_episode_length={unw.max_episode_length}, expected ceil({episode_s}/{step_dt})"
+        f"={expected_len}")
+
+# ------------------------------------------------------------------ C5  timing
+steps_per_episode = episode_s / step_dt
+divides = abs(steps_per_episode - round(steps_per_episode)) < 1e-6
+consistent = abs(step_dt - sim_dt * decimation) < 1e-9
+V.check("C5", "timing", sim_dt > 0 and decimation >= 1 and consistent and divides,
+        f"sim.dt={sim_dt} decimation={decimation} step_dt={step_dt} "
+        f"({1 / step_dt:.1f} Hz policy, {1 / sim_dt:.1f} Hz physics), "
+        f"episode_length_s={episode_s} => {steps_per_episode:.4f} steps"
+        f"{'' if divides else ' — NOT integral, the last step is truncated'}")
+
+# ------------------------------------------------------------------ C6  collision geometry
+# A collision mesh is not the mesh you see. PhysX defaults a dynamic mesh collider to its
+# CONVEX HULL, which wraps every concavity: a mug's handle hole fills in, a bin's interior
+# becomes a solid block, a fork's tines merge. The scene looks right and the contacts are wrong,
+# and nothing downstream reports it — the policy just learns something impossible.
+import omni.usd                                    # noqa: E402
+from pxr import Usd, UsdGeom, UsdPhysics           # noqa: E402
+
+CONVEX_SAFE = {"convexdecomposition", "sdf", "none", "meshsimplification"}
+
+stage = omni.usd.get_context().get_stage()
+env0 = unw.scene.env_prim_paths[0] if hasattr(unw.scene, "env_prim_paths") else "/World/envs/env_0"
+
+
+def mesh_volume(points, counts, indices):
+    """Signed volume via the divergence theorem, fan-triangulating each face.
+
+    Solidity is scale-invariant, so the mesh's local points are enough — no xform needed.
+    """
+    counts, indices = np.asarray(counts, dtype=int), np.asarray(indices, dtype=int)
+    vol = 0.0
+    if counts.size and (counts == counts[0]).all():          # uniform faces — vectorized
+        faces = indices.reshape(-1, int(counts[0]))
+        a = points[faces[:, 0]]
+        for k in range(1, faces.shape[1] - 1):
+            vol += float(np.einsum("ij,ij->i",
+                                   a, np.cross(points[faces[:, k]],
+                                               points[faces[:, k + 1]])).sum())
+    else:                                                    # mixed n-gons — rare, walk them
+        offset = 0
+        for count in counts:
+            for k in range(1, count - 1):
+                a, b, c = (points[indices[offset]], points[indices[offset + k]],
+                           points[indices[offset + k + 1]])
+                vol += float(np.dot(a, np.cross(b, c)))
+            offset += count
+    return abs(vol) / 6.0
+
+
+def hull_volume(points):
+    try:
+        from scipy.spatial import ConvexHull
+        return float(ConvexHull(points).volume), "hull"
+    except Exception:
+        return float(np.prod(points.max(axis=0) - points.min(axis=0))), "bbox"
+
+
+entities = {}
+entities.update({f"articulation:{k}": v for k, v in unw.scene.articulations.items()})
+entities.update({f"rigid_object:{k}": v for k, v in unw.scene.rigid_objects.items()})
+
+risky, no_collider = [], []
+for name, entity in entities.items():
+    # InteractiveScene rewrites {ENV_REGEX_NS} to the regex namespace (/World/envs/env_.*)
+    # at build time, so cfg.prim_path no longer carries the token. Normalize either form.
+    root_path = entity.cfg.prim_path.replace("{ENV_REGEX_NS}", env0)
+    root_path = re.sub(r"/World/envs/env_[^/]*", env0, root_path)
+    root = stage.GetPrimAtPath(root_path)
+    if not root.IsValid():
+        no_collider.append(f"{name} ({root_path} not on stage)")
+        continue
+
+    colliders = 0
+    for prim in Usd.PrimRange(root, Usd.TraverseInstanceProxies(Usd.PrimDefaultPredicate)):
+        if not prim.HasAPI(UsdPhysics.CollisionAPI):
+            continue
+        colliders += 1
+        path = str(prim.GetPath())
+        if not prim.IsA(UsdGeom.Mesh):
+            print(f"      {name:<28} {path}  analytic shape ({prim.GetTypeName()}) — exact")
+            continue
+
+        approx = "convexHull"     # PhysX default when MeshCollisionAPI is not applied
+        if prim.HasAPI(UsdPhysics.MeshCollisionAPI):
+            approx = UsdPhysics.MeshCollisionAPI(prim).GetApproximationAttr().Get() or approx
+
+        mesh = UsdGeom.Mesh(prim)
+        points = np.asarray(mesh.GetPointsAttr().Get(), dtype=float)
+        counts = list(mesh.GetFaceVertexCountsAttr().Get() or [])
+        indices = list(mesh.GetFaceVertexIndicesAttr().Get() or [])
+        hull_v, metric = hull_volume(points)
+        ratio = (mesh_volume(points, counts, indices) / hull_v) if hull_v > 0 else 1.0
+
+        concave = ratio < CONVEXITY_MIN
+        safe = approx.lower() in CONVEX_SAFE
+        flag = "RISK" if (concave and not safe and path not in COLLISION_REVIEWED) else "ok"
+        print(f"      {name:<28} {path}  approximation={approx} "
+              f"solidity={ratio:.3f} ({metric}) [{flag}]")
+        if flag == "RISK":
+            risky.append(f"{path} (approximation={approx}, solidity={ratio:.3f})")
+
+    if colliders == 0:
+        no_collider.append(f"{name} ({root_path})")
+
+detail = f"{len(entities)} assets inspected"
+if no_collider:
+    detail += f"; NO COLLIDER on {no_collider}"
+if risky:
+    detail += (f"; concave mesh approximated by its convex hull: {risky} — re-cook with "
+               f"convexDecomposition (or SDF), or add the path to COLLISION_REVIEWED with a "
+               f"recorded reason")
+V.check("C6", "collision geometry", not risky and not no_collider, detail)
+
+# ------------------------------------------------------------------ C7  articulation limits
+# A joint limit is a constraint the solver ENFORCES, not a wall it cannot cross. Pull hard
+# enough on an under-damped drawer and PhysX lets it travel past its stop and then snaps it
+# back: the render shows a drawer opening further than it can and jittering, and a policy that
+# learns to yank gets rewarded for a state the task never meant to allow.
+#
+# The mirror failure costs just as much and looks like nothing: damping, friction or armature
+# swallow the actuator's full effort, the drawer never reaches "fully open", and a success
+# predicate keyed on the limit can never fire no matter how good the policy is.
+#
+# Both are invisible in a random rollout — random actions rarely drive a joint to its stop.
+# So drive each one there deliberately, at the strongest pull the actuator can deliver, and
+# watch where it ends up.
+
+
+def joint_limits(art):
+    for attr in ("joint_pos_limits", "soft_joint_pos_limits"):
+        lim = getattr(art.data, attr, None)
+        if lim is not None:
+            return lim
+    return None
+
+
+settle_window = max(5, LIMIT_DRIVE_STEPS // 5)
+limit_problems, limit_tested = [], 0
+
+for name, art in unw.scene.articulations.items():
+    if name in ARTICULATION_EXCLUDE:
+        continue
+    lim = joint_limits(art)
+    if lim is None:
+        limit_problems.append(f"{name}: no joint position limits exposed")
+        continue
+
+    default_pos = art.data.default_joint_pos.clone()
+    default_vel = art.data.default_joint_vel.clone()
+    effort_limit = getattr(art.data, "joint_effort_limits", None)
+
+    for j, jname in enumerate(art.joint_names):
+        if f"{name}.{jname}" in ARTICULATION_EXCLUDE:
+            continue
+        lo, hi = float(lim[0, j, 0]), float(lim[0, j, 1])
+        span = hi - lo
+        if not (math.isfinite(lo) and math.isfinite(hi)) or span <= 1e-6:
+            continue                       # continuous or welded joint — no limit to test
+        limit_tested += 1
+
+        for bound, sign in ((hi, 1.0), (lo, -1.0)):
+            # Drive the sim directly rather than through env.step: no action manager to
+            # overwrite the target, and no termination to reset the scene mid-test.
+            art.write_joint_state_to_sim(default_pos, default_vel)
+            art.reset()
+            target = default_pos.clone()
+            target[:, j] = bound + sign * 0.5 * span      # well past the stop
+            effort = torch.zeros_like(default_pos)
+            if effort_limit is not None:
+                effort[:, j] = sign * float(effort_limit[0, j])
+
+            traj = []
+            for _ in range(LIMIT_DRIVE_STEPS):
+                art.set_joint_position_target(target)
+                art.set_joint_effort_target(effort)
+                art.write_data_to_sim()
+                unw.sim.step(render=False)
+                unw.scene.update(sim_dt)
+                traj.append(float(art.data.joint_pos[0, j]))
+
+            extreme = max(traj) if sign > 0 else min(traj)
+            overshoot = (extreme - bound) * sign          # > 0 ⇒ went past the stop
+            gap = -overshoot                              # > 0 ⇒ never got there
+            tail = traj[-settle_window:]
+            spread = max(tail) - min(tail)
+            end = "upper" if sign > 0 else "lower"
+
+            if overshoot > LIMIT_VIOLATION_FRAC * span:
+                limit_problems.append(
+                    f"{name}.{jname} {end}: exceeded the limit by {overshoot:.4f} "
+                    f"({overshoot / span:.1%} of range) — the stop does not hold under full "
+                    f"drive; raise the joint's limit stiffness/damping or the solver iteration "
+                    f"counts")
+            elif gap > LIMIT_REACH_FRAC * span:
+                limit_problems.append(
+                    f"{name}.{jname} {end}: stopped {gap:.4f} short of the limit "
+                    f"({gap / span:.1%} of range) — the joint cannot reach its own stop; check "
+                    f"damping / friction / armature against the actuator's effort limit")
+            if spread > LIMIT_SETTLE_FRAC * span:
+                limit_problems.append(
+                    f"{name}.{jname} {end}: still moving {spread:.4f} over the last "
+                    f"{settle_window} steps ({spread / span:.1%} of range) — bouncing off the "
+                    f"stop rather than resting on it")
+            print(f"      {name}.{jname:<24} {end:<5} limit={bound:+.4f} reached={extreme:+.4f} "
+                  f"overshoot={overshoot:+.4f} settle_spread={spread:.4f}")
+
+if limit_tested == 0:
+    detail = f"no limited joints outside {ARTICULATION_EXCLUDE} — nothing articulated to test"
+else:
+    detail = f"{limit_tested} limited joint(s) driven to both stops"
+    if limit_problems:
+        detail += "; " + "; ".join(limit_problems)
+V.check("C7", "articulation limits", not limit_problems, detail)
+
+# ------------------------------------------------------------------ C8  collision provenance
+# C6 asks whether the collision geometry MATCHES the visual mesh. C8 asks who produced it, and
+# how many pieces it is in — a different question with a different failure.
+#
+# Handing a concave mesh to the simulator's own `convexDecomposition` cooker looks correct and
+# renders correctly. What it costs is shape count: PhysX cooks for fidelity, so keeping one
+# small feature open (a mug's handle hole) can take 128 hulls, and 128 x num_envs convex shapes
+# overflows the contact buffers. The fix is to decompose AHEAD of time with CoACD, coarsely,
+# and spawn each part as its own convexHull.
+#
+# The two are indistinguishable in a render, so this checks the two things that do differ:
+#   * no collider prim asks the simulator to decompose at load time, and
+#   * a <asset>.coacd.json manifest exists, naming CoACD and a hull count within budget.
+import json as _json                              # noqa: E402
+from pathlib import Path as _Path                 # noqa: E402
+
+RUNTIME_COOKED = {"convexdecomposition", "meshsimplification"}
+
+prov_problems, prov_report = [], []
+for name, entity in entities.items():
+    short = name.split(":", 1)[-1]
+    if short in PRIMITIVE_ASSETS:
+        prov_report.append(f"{short}: primitive/exact by decision — skipped")
+        continue
+
+    usd_path = getattr(getattr(entity.cfg, "spawn", None), "usd_path", None)
+    root_path = entity.cfg.prim_path.replace("{ENV_REGEX_NS}", env0)
+    root_path = re.sub(r"/World/envs/env_[^/]*", env0, root_path)
+    root = stage.GetPrimAtPath(root_path)
+
+    cooked, hulls = [], 0
+    if root.IsValid():
+        for prim in Usd.PrimRange(root, Usd.TraverseInstanceProxies(Usd.PrimDefaultPredicate)):
+            if not prim.HasAPI(UsdPhysics.CollisionAPI) or not prim.IsA(UsdGeom.Mesh):
+                continue
+            approx = "convexHull"
+            if prim.HasAPI(UsdPhysics.MeshCollisionAPI):
+                approx = UsdPhysics.MeshCollisionAPI(prim).GetApproximationAttr().Get() or approx
+            if approx.lower() in RUNTIME_COOKED:
+                cooked.append(f"{prim.GetPath()} ({approx})")
+            hulls += 1
+
+    if cooked:
+        prov_problems.append(
+            f"{short}: {len(cooked)} prim(s) left to the simulator's cooker {cooked[:2]} — "
+            f"pre-decompose the source mesh with coacd_decompose.py and spawn the parts")
+    if hulls > MAX_HULLS:
+        prov_problems.append(f"{short}: {hulls} collider meshes exceeds the {MAX_HULLS} hull "
+                             f"budget — raise CoACD's --threshold and re-decompose")
+
+    manifest = _Path(usd_path).with_suffix(".coacd.json") if usd_path else None
+    if manifest and manifest.is_file():
+        try:
+            data = _json.loads(manifest.read_text())
+        except (OSError, ValueError) as exc:
+            prov_problems.append(f"{short}: manifest unreadable ({exc})")
+        else:
+            if data.get("tool") != "coacd":
+                prov_problems.append(f"{short}: manifest tool is {data.get('tool')!r}, not coacd")
+            elif data.get("hulls", 0) > MAX_HULLS:
+                prov_problems.append(f"{short}: manifest records {data['hulls']} hulls "
+                                     f"> {MAX_HULLS}")
+            # The manifest says 32 parts; the stage must actually CARRY 32 collider prims.
+            # Merging the parts into one mesh and cooking that as a single convexHull satisfies
+            # every other condition here — manifest present, no runtime-cooker token, count
+            # within budget — while producing exactly the filled-in hull the pipeline exists to
+            # avoid. Only comparing the two numbers catches it.
+            if data.get("tool") == "coacd" and hulls and data.get("hulls") != hulls:
+                prov_problems.append(
+                    f"{short}: manifest has {data.get('hulls')} CoACD parts but the stage "
+                    f"carries {hulls} collider prim(s) — the parts were merged into one mesh "
+                    f"instead of spawned individually, so PhysX hulls the whole thing")
+            prov_report.append(f"{short}: coacd manifest {data.get('hulls')} hulls, "
+                               f"{hulls} collider prim(s) on stage")
+    elif hulls:
+        prov_problems.append(
+            f"{short}: no .coacd.json beside {usd_path or root_path} — nothing records what "
+            f"produced this collision geometry. Run coacd_decompose.py --inspect on it.")
+
+V.check("C8", "collision provenance", not prov_problems,
+        "; ".join(prov_report) + ("; " + "; ".join(prov_problems) if prov_problems else ""))
+
+# ------------------------------------------------------------------ verdict
+# V.done() BEFORE the teardown: Kit's shutdown can kill the process, and anything after
+# sim_app.close() may never run — including the `S1 OK:` line that IS the pass criterion.
+V.done("C1 registration · C2 action space · C3 observation space · C4 episode length · "
+       "C5 timing · C6 collision geometry · C7 articulation limits · "
+       "C8 collision provenance")
+env.close()
+sim_app.close()

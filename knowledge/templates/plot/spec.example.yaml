@@ -1,0 +1,79 @@
+# /harbor:plot spec — example
+#
+# Two ways to identify runs:
+#   (A) `figures:` — explicit list of subplots, each with task title + run-IDs grouped by baseline
+#   (B) `project:` + `tasks:` + `baselines:` + `group_by:` — script enumerates the project and
+#       buckets runs by config[group_by[0]] (task) × config[group_by[1]] (baseline)
+#
+# Use exactly one of (A) or (B).
+
+# ---- Option A: explicit run IDs ----
+figures:
+  - title: "Lift"
+    runs:
+      Ours:
+        - <entity>/<project>/4jn3tx8s
+        - <entity>/<project>/lcazz0kp
+        - <entity>/<project>/6s8w3z8e
+      Task-Specific:
+        - <entity>/<project-ready>/dkvj6uts
+        - <entity>/<project-ready>/za6teeh5
+      Object-Tracking:
+        - <entity>/<project>/sct5wkcv
+        - <entity>/<project>/3gp654ky
+  - title: "Multi-object"
+    runs:
+      Ours:
+        - <entity>/<project>/tlrc9x08
+        - <entity>/<project>/lrp7w34t
+      Task-Specific:
+        - <entity>/<project-ready>/wdwhgo2m
+      Object-Tracking:
+        - <entity>/<project>/02dauxze
+
+# ---- Option B: project URL with config-key grouping ----
+# project: <entity>/<project>
+# tasks: [Lift, MultiObject, Insert, Thread]
+# baselines: [Ours, Task-Specific, Object-Tracking]
+# group_by: [env_name, algorithm]   # config keys in run.config
+
+# ---- axes ----
+x_axis: _step
+y_axis: eval/success_rate
+x_label: Step
+y_label: Success Rate
+xlim: 200000000           # scalar OR list-per-figure: [2e8, 2e8, 3e8, ...]
+ylim: [0, 1.05]
+
+# ---- subplot layout (rows × cols >= len(figures)) ----
+layout:
+  rows: 1
+  cols: 2
+
+# ---- styling ----
+smoothing:
+  window: 11              # odd integer; set to 1 to disable
+  order: 3
+colors:
+  - [55, 126, 184]
+  - [255, 127, 0]
+  - [77, 175, 74]
+  - [152, 78, 163]
+# Per-baseline overrides (color + dash). Use to pair "default"/"tuned" variants of the same algorithm
+# under one color but distinguishable line styles. Dash values: solid | dash | dot | dashdot.
+# baseline_styles:
+#   PPO_default: {color: [55, 126, 184], dash: dash}
+#   PPO_tuned:   {color: [55, 126, 184], dash: solid}
+#   SAC_default: {color: [255, 127, 0], dash: dash}
+#   SAC_tuned:   {color: [255, 127, 0], dash: solid}
+font_size: 28
+width_per_col: 600
+height_per_row: 500
+horizontal_spacing: 0.08
+vertical_spacing: 0.15
+template: gridon          # plotly template name
+
+# ---- output ----
+output: /tmp/harbor-plot.pdf   # .pdf / .png / .svg via kaleido, .html via plotly
+samples: 10000000                 # wandb history sample cap per run
+interp_points: 100                # x-grid resolution after interpolation

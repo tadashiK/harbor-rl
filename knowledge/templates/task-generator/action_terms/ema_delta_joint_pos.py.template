@@ -1,0 +1,131 @@
+"""EMA cumulative-delta joint position action.
+
+Rendered by task-generator when the user picks `ema_delta_joint_pos` as the §2
+action mode. Drop into the new task's `mdp/actions.py`. Reference implementation:
+an internal bimanual manipulation suite's `env/action_managers/actions.py`.
+
+Per-step processing (raw action `a_t`, scale `s`, offset `o`, alpha `α`,
+init joint pose captured at reset `q_init`):
+
+    delta_t   = delta_{t-1} + s * a_t + o            # cumulative
+    delta_t   = clamp(delta_t, lower - q_init, upper - q_init)   # if limits set
+    base_t    = q_init + delta_t                     # guaranteed inside [lower, upper]
+    target_t  = α * base_t + (1 - α) * target_{t-1}  # EMA against last applied
+    target_t  = clamp(target_t, lower, upper)        # defensive (init may sit outside)
+
+Why the delta-side clamp (in addition to the post-EMA target clamp): without it,
+`delta` grows unbounded whenever the policy commands past the limit boundary.
+The absolute target gets clipped each step (good for the actuator), but the
+internal `delta` remembers the saturated direction, so when the policy reverses
+it has to burn through the accumulated overshoot before any joint motion
+resumes — a latency that the delta clamp removes.
+
+State carried across steps: `delta`, `prev_applied`. Reset semantics: on
+`env.reset()`, `delta := 0`, `prev_applied := q_init := current joint pos`.
+
+At t=0 (post-reset, with `prev_applied == q_init`, `delta_{-1} == 0`):
+
+    target_0 = q_init + α * (s * a_0 + o)            # before clamp
+"""
+from __future__ import annotations
+
+import torch
+from collections.abc import Sequence
+from typing import TYPE_CHECKING
+
+import isaaclab.utils.string as string_utils
+from isaaclab.assets import Articulation
+from isaaclab.envs.mdp.actions import JointPositionAction
+
+if TYPE_CHECKING:
+    from isaaclab.envs import ManagerBasedRLEnv
+
+    from . import actions_cfg
+
+
+class EMACumulativeRelativeJointPositionAction(JointPositionAction):
+    cfg: "actions_cfg.EMACumulativeRelativeJointPositionActionCfg"
+    _asset: Articulation
+
+    def __init__(
+        self,
+        cfg: "actions_cfg.EMACumulativeRelativeJointPositionActionCfg",
+        env: "ManagerBasedRLEnv",
+    ) -> None:
+        super().__init__(cfg, env)
+
+        if isinstance(cfg.alpha, float):
+            if not 0.0 <= cfg.alpha <= 1.0:
+                raise ValueError(f"alpha must be in [0, 1]. Got {cfg.alpha}.")
+            self._alpha = cfg.alpha
+        elif isinstance(cfg.alpha, dict):
+            self._alpha = torch.ones((env.num_envs, self.action_dim), device=self.device)
+            index_list, names_list, value_list = string_utils.resolve_matching_names_values(
+                cfg.alpha, self._joint_names
+            )
+            for name, value in zip(names_list, value_list):
+                if not 0.0 <= value <= 1.0:
+                    raise ValueError(f"alpha must be in [0, 1]. Got {value} for joint {name}.")
+            self._alpha[:, index_list] = torch.tensor(value_list, device=self.device)
+        else:
+            raise ValueError(f"unsupported alpha type: {type(cfg.alpha)}")
+
+        self._prev_applied_actions = torch.zeros_like(self.processed_actions)
+        self.del_action            = torch.zeros((env.num_envs, self.action_dim), device=env.device)
+        self.init_joint_pos        = self._asset.data.joint_pos[:, self._joint_ids].clone()
+        self.joint_lower_limit = (
+            torch.tensor(cfg.joint_lower_limit, device=self.device)
+            if cfg.joint_lower_limit is not None
+            else None
+        )
+        self.joint_upper_limit = (
+            torch.tensor(cfg.joint_upper_limit, device=self.device)
+            if cfg.joint_upper_limit is not None
+            else None
+        )
+
+    def reset(self, env_ids: Sequence[int] | None = None) -> None:
+        if env_ids is None:
+            env_ids = slice(None)
+        super().reset(env_ids)
+        # reset history to current joint positions
+        self._prev_applied_actions[env_ids, :] = self._asset.data.joint_pos[env_ids][
+            :, self._joint_ids
+        ].clone()
+        # reset cumulative delta
+        if isinstance(env_ids, slice):
+            self.del_action[:] = 0.0
+        else:
+            self.del_action[env_ids, :] = 0.0
+        # re-anchor init pose to current
+        self.init_joint_pos[env_ids, :] = self._asset.data.joint_pos[env_ids][
+            :, self._joint_ids
+        ].clone()
+
+    def process_actions(self, actions: torch.Tensor) -> None:
+        # super sets _processed_actions = scale * raw + offset
+        super().process_actions(actions)
+        # accumulate delta
+        self._processed_actions += self.del_action
+        self.del_action = self._processed_actions.clone()
+        # Clamp the cumulative delta so `init + delta ∈ [lower, upper]`. This
+        # stops `delta` from growing past the joint-limit boundary; otherwise the
+        # absolute target still gets clipped each step but `delta` keeps drifting,
+        # and a reversing action has to burn through the accumulated overshoot
+        # before any joint motion resumes.
+        if self.joint_lower_limit is not None and self.joint_upper_limit is not None:
+            del_lower = self.joint_lower_limit - self.init_joint_pos
+            del_upper = self.joint_upper_limit - self.init_joint_pos
+            self.del_action = torch.clamp(self.del_action, del_lower, del_upper)
+            self._processed_actions[:] = self.del_action
+        # anchor on init pose
+        self._processed_actions += self.init_joint_pos
+        # EMA against previous applied
+        ema = self._alpha * self._processed_actions + (1.0 - self._alpha) * self._prev_applied_actions
+        # clamp to joint limits if set (defensive — init may sit outside limits)
+        if self.joint_lower_limit is not None and self.joint_upper_limit is not None:
+            self._processed_actions[:] = torch.clamp(ema, self.joint_lower_limit, self.joint_upper_limit)
+        else:
+            self._processed_actions[:] = ema
+        # store for next step
+        self._prev_applied_actions[:] = self._processed_actions[:]

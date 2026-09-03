@@ -1,0 +1,6 @@
+            n_obs = self.obs_rms.normalize(next_obs) if self.obs_rms is not None else next_obs
+            next_value = self.critic(n_obs).flatten()
+            if self.value_rms is not None:
+                self.value_rms.update(next_value)
+                next_value = self.value_rms.unnormalize(next_value)
+            advantages = torch.zeros_like(rewards)

@@ -1,0 +1,73 @@
+#!/bin/bash -l
+#
+#SBATCH --array=0-{{N_MINUS_1}}
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --time={{TIME_LIMIT}}
+#SBATCH --gres=gpu:{{GPU_TYPE}}
+#SBATCH --job-name={{SWEEP_ID}}
+# stdout/stderr → slurm-<jobid>_<arrayidx>.out in $SLURM_SUBMIT_DIR (SLURM default).
+# SLURM does not expand $HOME/$USER in SBATCH paths, so absolute log paths are
+# brittle across hosts. Add `--output=...` here only if your site has a guaranteed
+# pre-existing path (or use `--chdir=...` to control the submit dir).
+
+# Auto-generated — DO NOT HAND-EDIT. Rendered by /harbor:rl-sweep cluster=... and by
+# reward-tune's cluster mode (one candidate = one trial), so both cluster paths get the
+# same site environment. Keep it parameterised rather than forking a second copy.
+# Sweep id : {{SWEEP_ID}}
+# Trials   : {{N_TRIALS}} (Cartesian product of {{PARSED_ARGS_SUMMARY}})
+# Repo     : {{REPO_PATH}}
+# Generated: {{GENERATED_AT}}
+
+# --- Site environment (edit for your cluster) ---
+# The venv below is self-contained (uv-managed Python), but most SLURM sites
+# still need a Python on PATH so `.venv/bin/activate` can resolve its
+# interpreter symlink target. Guarded so sites without an environment-module
+# system (or with a differently-named module) don't hard-fail here.
+if command -v module >/dev/null 2>&1; then
+    module load python 2>/dev/null || true
+fi
+
+# Many HPC sites firewall outbound HTTPS from compute nodes, which wandb needs.
+# Set your site's proxy with the `proxy=` arg to /harbor:rl-sweep, or export
+# HTTP(S)_PROXY in the SLURM environment. Empty default = no proxy.
+export HTTP_PROXY=${HTTP_PROXY-{{PROXY_DEFAULT}}}
+export HTTPS_PROXY=${HTTPS_PROXY-{{PROXY_DEFAULT}}}
+export NO_PROXY=${NO_PROXY:-localhost,127.0.0.1}
+export WANDB_API_KEY=${WANDB_API_KEY:-{{WANDB_API_KEY}}}
+
+# Repo root is baked in at render time (the absolute path of the repo the sweep
+# was generated from). Override with HARBOR_REPO_ROOT when submitting from a
+# host where the repo lives elsewhere.
+# (sbatch copies the script to a spool dir, so $0-relative path resolution is
+# unreliable on SLURM — an absolute path is required.)
+REPO_ROOT="${HARBOR_REPO_ROOT:-{{REPO_PATH}}}"
+if [ ! -d "$REPO_ROOT" ]; then
+    echo "[ERROR] repo root not found: $REPO_ROOT" >&2
+    echo "        Re-submit with HARBOR_REPO_ROOT=/path/to/repo" >&2
+    exit 1
+fi
+cd "$REPO_ROOT"
+
+# Activate the uv venv created by `bash harbor/dependency-generator/setup_uv.sh`.
+if [ ! -f .venv/bin/activate ]; then
+    echo "[ERROR] .venv not found at $REPO_ROOT/.venv" >&2
+    echo "        Run this once on the cluster before sbatch:" >&2
+    echo "          cd $REPO_ROOT && bash harbor/dependency-generator/setup_uv.sh" >&2
+    exit 1
+fi
+source .venv/bin/activate
+
+# --- Trial table (parallel arrays; index = $SLURM_ARRAY_TASK_ID) ---
+TRIAL_IDS=(
+{{TRIAL_IDS}}
+)
+TRIAL_CMDS=(
+{{TRIAL_COMMANDS}}
+)
+
+ID="${TRIAL_IDS[$SLURM_ARRAY_TASK_ID]}"
+CMD="${TRIAL_CMDS[$SLURM_ARRAY_TASK_ID]}"
+echo "[sweep {{SWEEP_ID}}] trial $SLURM_ARRAY_TASK_ID :: $ID"
+echo "[cmd] $CMD"
+eval "$CMD"

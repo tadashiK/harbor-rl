@@ -1,0 +1,6 @@
+    def get_q1(self, state: Tensor, action: Tensor) -> Tensor:
+        x = torch.cat((state, action), dim=1)
+        return self.net_q1(x)
+
+
+class MLPCritic(nn.Module):

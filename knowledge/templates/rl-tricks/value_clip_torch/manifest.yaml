@@ -1,0 +1,24 @@
+name: value_clip_torch
+description: |
+  PPO-style clipped value loss for the custom_torch tree. Mirrors the
+  policy-side ratio clip onto the critic: the value step takes
+    L_v = 0.5 * max( (v - returns)^2 , (clip(v - old_v, -ε, ε) + old_v - returns)^2 )
+  which prevents the critic from moving too far from the rollout's
+  bootstrap targets in a single update. Frees you to run more epochs /
+  larger minibatches without value collapse.
+
+  Reference: the built-in custom_torch PPO — the `if self.cfg.algo.value_clip:` branch
+  inside `update_net` that applies torch.max over unclipped/clipped MSE.
+
+algorithms: [ppo]
+backend: custom_torch
+
+references:
+  - custom_torch PPO            # canonical value-clip block in update_net
+  - knowledge/templates/rl-integration-generator/custom_torch/algo/ppo.py.template  # the file we patch (rendered copy under <repo>/harbor/...)
+
+caveats:
+  - "Reuses the policy `clip_range` (ε) for the value clip. If you want them to diverge, set cfg.algo.clip_range_vf separately and tweak the trick edits."
+  - "Stacks cleanly with value_norm_torch — the clip op is on whatever scale `v` and `returns` are at, so normalized targets work too."
+
+patches: patches.yaml

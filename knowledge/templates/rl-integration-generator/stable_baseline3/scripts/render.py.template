@@ -1,0 +1,146 @@
+"""
+{{PROJECT_NAME}} — render a trained policy to video.mp4 (stable-baselines3).
+
+Single env (n_envs=1), offscreen rendering enabled (render_mode='rgb_array'), runs ONE
+episode with the loaded checkpoint and writes:
+
+    <checkpoint-dir>/render.mp4
+    <checkpoint-dir>/render_contact_sheet.jpg   (5-frame sample: first / 25% / 50% / 75% / final)
+
+Always produces a visible artifact — works on headless hosts because we use
+offscreen rendering. To open a live window instead, use the env's native viewer
+(e.g. dm_control.viewer.launch).
+
+Example:
+    python harbor/scripts/rl/stable_baseline3/render.py algo=ppo task={{DEFAULT_TASK}} \\
+        checkpoint=harbor/outputs/<trial_id>/checkpoint.zip
+"""
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+import hydra
+import numpy as np
+from omegaconf import DictConfig, OmegaConf
+
+from stable_baselines3 import PPO, SAC, TD3, DDPG, A2C
+
+REPO     = Path(__file__).resolve().parents[4]   # actual repo root
+HARBOR = Path(__file__).resolve().parents[3]   # <repo>/harbor
+sys.path.insert(0, str(HARBOR))
+sys.path.insert(0, str(REPO))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from env_wrapper import create_render_env  # noqa: E402
+
+
+SB3_CLASS_MAP = {"ppo": PPO, "sac": SAC, "td3": TD3, "ddpg": DDPG, "a2c": A2C}
+
+
+def _grab_frame(env) -> np.ndarray | None:
+    """Best-effort RGB frame extractor — handles gymnasium and SB3 vec wrappers."""
+    if hasattr(env, "render"):
+        try:
+            frame = env.render()
+            if isinstance(frame, np.ndarray):
+                return frame.astype(np.uint8)
+            if isinstance(frame, list) and frame and isinstance(frame[0], np.ndarray):
+                return frame[0].astype(np.uint8)
+        except Exception:
+            pass
+    return None
+
+
+def _write_mp4(frames: list[np.ndarray], path: Path, fps: int = 30) -> None:
+    if not frames:
+        print("[render] no frames captured — skipping mp4 write", file=sys.stderr)
+        return
+    try:
+        import imageio.v2 as imageio
+    except ImportError:
+        import imageio  # type: ignore[no-redef]
+    imageio.mimsave(str(path), frames, fps=fps, codec="libx264", quality=8)
+
+
+def _write_contact_sheet(frames: list[np.ndarray], path: Path) -> None:
+    if not frames:
+        return
+    try:
+        from PIL import Image
+    except ImportError:
+        return
+    n = len(frames)
+    indices = sorted({0, n // 4, n // 2, 3 * n // 4, n - 1})
+    sample = [Image.fromarray(frames[i]) for i in indices]
+    h = max(im.height for im in sample)
+    w = sum(im.width for im in sample)
+    sheet = Image.new("RGB", (w, h))
+    x = 0
+    for im in sample:
+        sheet.paste(im, (x, 0))
+        x += im.width
+    sheet.save(str(path), quality=85)
+
+
+@hydra.main(version_base=None, config_path="../../../configs/rl", config_name="ppo")
+def main(cfg: DictConfig):
+    OmegaConf.set_struct(cfg, False)
+    algo = str(cfg.get("algo", "ppo"))
+    task = cfg.get("task")
+    ckpt_path = cfg.get("checkpoint")
+    fps = int(cfg.get("fps", 30))
+    max_steps = int(cfg.get("max_steps", 1000))
+
+    if task is None:
+        print("[error] task=<id> is required.", file=sys.stderr); sys.exit(2)
+    if not ckpt_path:
+        print("[error] checkpoint=<path> is required.", file=sys.stderr); sys.exit(2)
+    ckpt = Path(ckpt_path)
+    if not ckpt.is_absolute():
+        ckpt = REPO / ckpt
+    if not ckpt.exists():
+        print(f"[error] checkpoint not found: {ckpt}", file=sys.stderr); sys.exit(2)
+
+    env = create_render_env(cfg)
+    model_cls = SB3_CLASS_MAP[algo]
+    model = model_cls.load(str(ckpt))   # no env binding — single-step inference only
+
+    frames: list[np.ndarray] = []
+    obs, info = env.reset() if hasattr(env, "reset") and isinstance(env.reset(), tuple) else (env.reset(), {})
+    # Re-reset cleanly (the probe above already consumed a reset).
+    out = env.reset()
+    obs = out[0] if isinstance(out, tuple) else out
+
+    ep_return = 0.0
+    for step in range(max_steps):
+        frame = _grab_frame(env)
+        if frame is not None:
+            frames.append(frame)
+        action, _ = model.predict(obs, deterministic=True)
+        step_out = env.step(action)
+        if len(step_out) == 5:
+            obs, reward, term, trunc, info = step_out
+            done = bool(term) or bool(trunc)
+        else:
+            obs, reward, done, info = step_out
+        ep_return += float(reward)
+        if done:
+            # Capture final frame too.
+            frame = _grab_frame(env)
+            if frame is not None:
+                frames.append(frame)
+            break
+
+    out_dir = ckpt.parent
+    mp4 = out_dir / "render.mp4"
+    sheet = out_dir / "render_contact_sheet.jpg"
+    _write_mp4(frames, mp4, fps=fps)
+    _write_contact_sheet(frames, sheet)
+    print(f"[render] wrote {mp4} ({len(frames)} frames, return={ep_return:.4f})", flush=True)
+    if frames:
+        print(f"[render] wrote {sheet}", flush=True)
+
+
+if __name__ == "__main__":
+    main()

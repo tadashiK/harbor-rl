@@ -1,0 +1,44 @@
+    def get_q1(self, state: Tensor, action: Tensor) -> Tensor:
+        x = torch.cat((state, action), dim=1)
+        return self.net_q1(x)
+
+
+class DistributionalDoubleQ(nn.Module):
+    """C51 distributional twin-Q. Each net outputs `num_atoms` logits → softmax
+    over the fixed support [v_min, v_max].
+
+    The non-distributional API (get_q_min / get_q1_q2 / get_q1) returns the
+    EXPECTED value (E[Z] = sum p(z) * z) so this class is a drop-in for
+    DoubleQ everywhere. The C51 critic loss reaches the underlying
+    distribution via get_q1_q2_dist."""
+
+    def __init__(self, state_dim, act_dim: int, v_min: float = -10.0,
+                 v_max: float = 10.0, num_atoms: int = 51):
+        super().__init__()
+        if isinstance(state_dim, Sequence):
+            state_dim = state_dim[0]
+        self.net_q1 = MLPNet(in_dim=state_dim + act_dim, out_dim=num_atoms)
+        self.net_q2 = MLPNet(in_dim=state_dim + act_dim, out_dim=num_atoms)
+        self.v_min = float(v_min)
+        self.v_max = float(v_max)
+        self.num_atoms = int(num_atoms)
+        self.register_buffer("z_atoms", torch.linspace(v_min, v_max, num_atoms))
+
+    def get_q1_q2_dist(self, state: Tensor, action: Tensor):
+        x = torch.cat((state, action), dim=1)
+        return torch.softmax(self.net_q1(x), dim=1), torch.softmax(self.net_q2(x), dim=1)
+
+    def get_q1_q2(self, state: Tensor, action: Tensor):
+        d1, d2 = self.get_q1_q2_dist(state, action)
+        return ((d1 * self.z_atoms).sum(dim=1, keepdim=True),
+                (d2 * self.z_atoms).sum(dim=1, keepdim=True))
+
+    def get_q_min(self, state: Tensor, action: Tensor) -> Tensor:
+        return torch.min(*self.get_q1_q2(state, action))
+
+    def get_q1(self, state: Tensor, action: Tensor) -> Tensor:
+        x = torch.cat((state, action), dim=1)
+        return (torch.softmax(self.net_q1(x), dim=1) * self.z_atoms).sum(dim=1, keepdim=True)
+
+
+class MLPCritic(nn.Module):

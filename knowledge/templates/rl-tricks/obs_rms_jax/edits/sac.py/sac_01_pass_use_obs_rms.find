@@ -1,0 +1,15 @@
+        super().__post_init__()
+        hidden = tuple(self.cfg.algo.get("hidden_dims", (256, 256)))
+        activation = str(self.cfg.algo.get("activation", "relu"))
+
+        self.actor_net = TanhDiagGaussianActor(
+            action_dim=self.action_dim, hidden_dims=hidden, activation=activation,
+        )
+        self.critic_net = DoubleQ(hidden_dims=hidden, activation=activation)
+
+        keys = self.split(4)
+        dummy_obs = jnp.zeros((1, self.obs_dim))
+        dummy_act = jnp.zeros((1, self.action_dim))
+        actor_init = self.actor_net.init(keys[0], dummy_obs)
+        critic_init = self.critic_net.init(keys[1], dummy_obs, dummy_act)
+

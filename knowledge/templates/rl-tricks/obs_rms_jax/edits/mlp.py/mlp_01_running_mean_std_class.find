@@ -1,0 +1,18 @@
+        return x
+
+
+# -----------------------------------------------------------------------------
+# Actors
+# -----------------------------------------------------------------------------
+class DiagGaussianActor(nn.Module):
+    """PPO actor — diagonal Gaussian, state-independent log-std (a Flax param)."""
+    action_dim: int
+    hidden_dims: Sequence[int] = (256, 256)
+    activation: str = "tanh"
+    init_log_std: float = 0.0
+
+    @nn.compact
+    def __call__(self, x):
+        mean = MLP(self.hidden_dims, self.action_dim, self.activation,
+                   output_init_scale=0.01)(x)
+        log_std = self.param(

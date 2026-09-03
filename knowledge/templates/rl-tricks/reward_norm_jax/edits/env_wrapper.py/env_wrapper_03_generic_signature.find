@@ -1,0 +1,10 @@
+    env = RLFactory.make(task, **env_params)
+    env = LogWrapper(env)
+    env = VecEnv(env)
+    return env
+
+
+def _build_generic_mjx_env(task: str, env_params: dict):
+    """Hook for other JAX/MJX benchmarks. Override per repo as needed."""
+    raise NotImplementedError(
+        f"custom_jax requires a vmap'd MJX-style env for task '{task}'. "

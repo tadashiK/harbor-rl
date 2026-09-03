@@ -1,0 +1,125 @@
+# Ports the algorithmic recipe of LocoMuJoCo
+# (https://github.com/robfiras/loco-mujoco)
+# Copyright (c) 2024 Al-Hafez. Licensed under the MIT License.
+# Full retained notice: THIRD_PARTY_NOTICES.md in the HARBOR repository.
+"""
+{{PROJECT_NAME}} — env factory for custom_jax train/eval/render.
+
+REQUIRES vmap rollout: the env must expose the MJX-style contract
+    env.reset(reset_keys)              -> (obs, env_state)
+    env.step(env_state, action)        -> (obs, reward, absorbing, done, info, env_state)
+
+This is the contract loco-mujoco's RLFactory + LogWrapper + VecEnv produces.
+For other JAX/MJX benchmarks that follow the same convention this works as-is;
+benchmarks WITHOUT this contract (gymnasium-style step/reset) cannot use
+custom_jax — fall back to custom_torch instead.
+
+Mirrors the upstream loco-mujoco PPOJax._wrap_env pattern (see
+loco_mujoco/algorithms/ppo_jax.py):
+
+  - env_params from the cfg → kwargs passed to RLFactory.make()
+    (lets you override `reward_type`, `goal_type`, `reward_params`,
+    `terminal_state_type`, `horizon`, `headless`, etc. without touching
+    Python code; matches loco-mujoco/examples/training_examples/jax_rl/conf.yaml)
+
+Exposes:
+    create_env(cfg)         — vmap'd env for train + eval (num_envs from cfg)
+    create_render_env(cfg)  — single env for render.py (n=1)
+"""
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+REPO     = Path(__file__).resolve().parents[4]   # actual repo root
+HARBOR = Path(__file__).resolve().parents[3]   # <repo>/harbor
+sys.path.insert(0, str(HARBOR))
+sys.path.insert(0, str(REPO))
+
+
+def _resolve_env_params(cfg) -> dict:
+    """Extract env_params from cfg (top-level OR cfg.experiment.env_params).
+
+    Returns a plain dict suitable for `**kwargs` expansion into
+    `RLFactory.make(...)`. The dict's `env_name` key is removed since it's
+    passed positionally as `task`.
+    """
+    from omegaconf import DictConfig, OmegaConf
+    raw = None
+    if "env_params" in cfg:
+        raw = cfg.env_params
+    elif "experiment" in cfg and isinstance(cfg.experiment, DictConfig) and "env_params" in cfg.experiment:
+        raw = cfg.experiment.env_params
+    if raw is None:
+        return {}
+    d = OmegaConf.to_container(raw, resolve=True) if isinstance(raw, DictConfig) else dict(raw)
+    d.pop("env_name", None)  # passed positionally, not as kwarg
+    return d
+
+
+def _build_loco_mujoco_env(task: str, env_params: dict):
+    """Build a loco-mujoco MJX env wrapped with LogWrapper + VecEnv.
+
+    Mirrors the canonical wrapper stack from loco_mujoco.algorithms.ppo_jax
+    (see PPOJax._wrap_env): LogWrapper for episode-return / length tracking,
+    VecEnv for the vmap'd reset/step contract.
+
+    loco-mujoco maintains TWO parallel registries:
+      - `<Name>`     → CPU-only Mujoco backend (no `_first_data`, no mjx_reset)
+      - `Mjx<Name>`  → JAX/MJX backend (what custom_jax requires)
+    Auto-prepend the `Mjx` prefix if the caller passed the CPU name and the
+    Mjx variant exists. Pass-through if it's already prefixed.
+    """
+    from loco_mujoco import RLFactory
+    from loco_mujoco.core.wrappers import LogWrapper, VecEnv
+    from loco_mujoco.environments.base import LocoEnv
+    if not task.startswith("Mjx"):
+        candidate = f"Mjx{task}"
+        if candidate in LocoEnv.registered_envs:
+            task = candidate
+    env = RLFactory.make(task, **env_params)
+    env = LogWrapper(env)
+    env = VecEnv(env)
+    return env
+
+
+def _build_generic_mjx_env(task: str, env_params: dict):
+    """Hook for other JAX/MJX benchmarks. Override per repo as needed."""
+    raise NotImplementedError(
+        f"custom_jax requires a vmap'd MJX-style env for task '{task}'. "
+        "If this is loco-mujoco the auto-detect path should have triggered. "
+        "Otherwise wire your benchmark here in env_wrapper._build_generic_mjx_env."
+    )
+
+
+def create_env(cfg):
+    """Build the training env. Branches by import availability + env_params from cfg."""
+    task = str(cfg.get("task"))
+    env_params = _resolve_env_params(cfg)
+    try:
+        import loco_mujoco  # noqa: F401
+        env = _build_loco_mujoco_env(task, env_params)
+    except ImportError:
+        env = _build_generic_mjx_env(task, env_params)
+    _assert_mjx_contract(env, task)
+    return env
+
+
+def create_render_env(cfg):
+    """Build a render env (n=1, same MJX contract). Used by render.py.
+
+    For loco-mujoco the same VecEnv works with num_envs=1; for other benchmarks
+    you may need a render-mode-enabled variant. Default = same as create_env
+    with num_envs forced to 1 inside cfg.
+    """
+    from omegaconf import OmegaConf
+    cfg = OmegaConf.create(OmegaConf.to_container(cfg, resolve=True))
+    cfg.num_envs = 1
+    return create_env(cfg)
+
+
+def _assert_mjx_contract(env, task: str) -> None:
+    """Fail fast if the env doesn't honor the MJX vmap contract."""
+    if not (hasattr(env, "reset") and hasattr(env, "step")):
+        raise TypeError(f"env for task '{task}' is missing reset/step methods")
+    # Other duck-typed checks (mdp_info / info) happen at agent init time.

@@ -1,0 +1,12 @@
+custom_jax — fall back to custom_torch instead.
+
+Mirrors the upstream loco-mujoco PPOJax._wrap_env pattern (see
+loco_mujoco/algorithms/ppo_jax.py):
+
+  - env_params from the cfg → kwargs passed to RLFactory.make()
+    (lets you override `reward_type`, `goal_type`, `reward_params`,
+    `terminal_state_type`, `horizon`, `headless`, etc. without touching
+    Python code; matches loco-mujoco/examples/training_examples/jax_rl/conf.yaml)
+
+Exposes:
+    create_env(cfg)         — vmap'd env for train + eval (num_envs from cfg)

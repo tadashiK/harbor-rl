@@ -1,0 +1,11 @@
+    """Build the training env. Branches by import availability + env_params from cfg."""
+    task = str(cfg.get("task"))
+    env_params = _resolve_env_params(cfg)
+    try:
+        import loco_mujoco  # noqa: F401
+        env = _build_loco_mujoco_env(task, env_params)
+    except ImportError:
+        env = _build_generic_mjx_env(task, env_params)
+    _assert_mjx_contract(env, task)
+    return env
+

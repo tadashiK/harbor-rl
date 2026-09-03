@@ -1,0 +1,13 @@
+    env = RLFactory.make(task, **env_params)
+    env = LogWrapper(env)
+    env = VecEnv(env)
+    if normalize_env:
+        from loco_mujoco.core.wrappers import NormalizeVecReward
+        env = NormalizeVecReward(env, gamma)
+    return env
+
+
+def _build_generic_mjx_env(task: str, env_params: dict, normalize_env: bool, gamma: float):
+    """Hook for other JAX/MJX benchmarks. Override per repo as needed."""
+    raise NotImplementedError(
+        f"custom_jax requires a vmap'd MJX-style env for task '{task}'. "

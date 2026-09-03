@@ -1,0 +1,15 @@
+        hidden = tuple(self.cfg.algo.get("hidden_dims", (256, 256)))
+        activation = str(self.cfg.algo.get("activation", "tanh"))
+        init_log_std = float(self.cfg.algo.get("init_log_std", 0.0))
+        use_obs_rms = bool(self.cfg.algo.get("use_obs_rms", True))
+
+        self.actor_net = DiagGaussianActor(
+            action_dim=self.action_dim, hidden_dims=hidden,
+            activation=activation, init_log_std=init_log_std,
+            use_obs_rms=use_obs_rms,
+        )
+        self.critic_net = MLPCritic(hidden_dims=hidden, activation=activation,
+                                    use_obs_rms=use_obs_rms)
+
+        keys = self.split(3)
+        dummy_obs = jnp.zeros((1, self.obs_dim))
